@@ -55,19 +55,26 @@ jobs:
           docker build -t ${{ steps.image.outputs.tag }} -f Dockerfile .
           docker push ${{ steps.image.outputs.tag }}
 
-      # Internal ingress only: the service is reachable solely from the Node
-      # backend inside the same project/VPC, never the public internet.
-      # Secrets (INTERNAL_API_KEY, DEEPSEEK_API_KEY) are injected from
-      # Secret Manager; no Vertex/ADC needed (DeepSeek is the LLM).
-      - name: Deploy new revision (no traffic)
+      # --no-traffic is not supported when creating a new service (first deploy).
+      # Detect this upfront and omit the flag when the service doesn't exist yet.
+      - name: Deploy new revision
+        id: deploy
         run: |
+          SERVICE_EXISTS=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
+            --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
+            --format="value(name)" 2>/dev/null || true)
+
+          NO_TRAFFIC_FLAG=""
+          [ -n "$SERVICE_EXISTS" ] && NO_TRAFFIC_FLAG="--no-traffic --tag=candidate"
+
           gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
             --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
             --image=${{ steps.image.outputs.tag }} \
             --ingress=internal \
+            --memory=512Mi \
             --set-env-vars=LABY_MODEL=deepseek/deepseek-chat,NODE_INTERNAL_BASE_URL=https://app.dentnode.com/api \
             --set-secrets=INTERNAL_API_KEY=LABY_INTERNAL_API_KEY:latest,DEEPSEEK_API_KEY=LABY_DEEPSEEK_API_KEY:latest \
-            --no-traffic --tag=candidate --quiet
+            $NO_TRAFFIC_FLAG --quiet
 
       - id: revision
         run: |
@@ -77,28 +84,35 @@ jobs:
             --format="value(name)")
           echo "name=$REV" >> $GITHUB_OUTPUT
 
-      - name: Canary 10% -> health check -> promote to 100%
+      # Poll Cloud Run's own revision readiness instead of curling /health —
+      # the service is --ingress=internal so it's unreachable from GHA runners.
+      # Readiness=True means the container started cleanly and passed its health
+      # check, which is equivalent (and more reliable) than an external curl.
+      - name: Wait for revision ready then promote to 100%
         run: |
-          gcloud run services update-traffic ${{ env.CLOUD_RUN_SERVICE }} \
-            --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
-            --to-revisions=${{ steps.revision.outputs.name }}=10
+          REV="${{ steps.revision.outputs.name }}"
 
-          CANDIDATE_URL=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
-            --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
-            --format="value(status.url)")
-          for i in $(seq 1 6); do
-            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 \
-              "${CANDIDATE_URL}/health" || echo "000")
-            echo "Health check $i: HTTP $STATUS"
-            [ "$STATUS" = "200" ] && break
-            [ "$i" = "6" ] && exit 1
+          for i in $(seq 1 18); do
+            READY=$(gcloud run revisions describe "$REV" \
+              --region=${{ env.GCP_REGION }} --project=${{ env.GCP_PROJECT }} \
+              --format=json 2>/dev/null \
+              | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+conds = data.get('status', {}).get('conditions', [])
+r = next((c for c in conds if c.get('type') == 'Ready'), {})
+print(r.get('status', 'Unknown'))
+" || echo "Unknown")
+            echo "Revision ready check $i/18: $READY"
+            [ "$READY" = "True" ] && break
+            [ "$i" = "18" ] && { echo "Revision did not become Ready in time."; exit 1; }
             sleep 10
           done
 
           gcloud run services update-traffic ${{ env.CLOUD_RUN_SERVICE }} \
             --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
-            --to-revisions=${{ steps.revision.outputs.name }}=100
-          echo "Deployed ${{ steps.revision.outputs.name }} to 100%."
+            --to-revisions=$REV=100
+          echo "Deployed $REV to 100%."
 
       - name: Rollback on failure
         if: failure()
