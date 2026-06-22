@@ -1,0 +1,54 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Token Tracking ───────────────────────────────────────────────────────────
+
+model AiTokenLedger {
+  id          String   @id @default(cuid())
+  labId       String
+  featureUsed String   // "chat", "scan", "webhook_sync", "agent"
+  modelUsed   String   // "gpt-4o", "gemini-2.0-flash", "text-embedding-3-small"
+  inputTokens Int      @default(0)
+  outputTokens Int     @default(0)
+  costUsd     Float    @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([labId])
+  @@index([labId, createdAt])
+  @@map("ai_token_ledgers")
+}
+
+model LabQuota {
+  labId               String   @id
+  tier                String   @default("basic") // "basic", "pro", "enterprise"
+  monthlyTokenCap     Int      @default(50000)
+  tokensUsedThisMonth Int      @default(0)
+  resetAt             DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@map("lab_quotas")
+}
+
+// ─── Vector Embeddings ────────────────────────────────────────────────────────
+
+model VectorEmbedding {
+  id          String   @id @default(cuid())
+  labId       String
+  entityType  String   // "case", "invoice", "doctor"
+  entityId    String
+  chunkIndex  Int      @default(0)
+  content     String   // The raw text chunk that was embedded
+  // embedding is stored as a raw pgvector column; we manage it via $executeRaw
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([labId, entityType, entityId, chunkIndex])
+  @@index([labId])
+  @@index([labId, entityType])
+  @@map("vector_embeddings")
+}

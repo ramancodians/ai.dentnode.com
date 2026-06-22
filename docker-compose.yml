@@ -1,0 +1,28 @@
+# Local dev for the Laby ADK agent.
+#
+# The agent container talks to:
+#   - The Node backend (app.dentnode.com) running on the HOST (npm run dev-server,
+#     port 3000) for its tool callbacks, via host.docker.internal.
+#   - DeepSeek's API for generation (needs DEEPSEEK_API_KEY).
+#
+# Prereqs on the host:
+#   export DEEPSEEK_API_KEY=sk-...   (and INTERNAL_API_KEY matching the Node .env)
+#   (Node backend running: cd ../app.dentnode.com && npm run dev-server)
+#
+# Then:  docker compose up --build
+services:
+  laby-agent:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      LABY_MODEL: "deepseek/deepseek-chat"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in your shell}"
+      # Must match INTERNAL_API_KEY in the Node backend's .env
+      INTERNAL_API_KEY: "${INTERNAL_API_KEY:-dev-internal-key}"
+      # Reach the host's Node dev server (note the /api prefix).
+      NODE_INTERNAL_BASE_URL: "http://host.docker.internal:3000/api"
+      LABY_HISTORY_TURNS: "12"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

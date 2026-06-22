@@ -1,0 +1,9 @@
+# google-adk provides the agent framework; litellm powers the DeepSeek
+# (OpenAI-compatible) model via google.adk.models.lite_llm.LiteLlm.
+google-adk>=2.0.0,<3.0.0
+litellm>=1.50.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+httpx>=0.27.0
+pydantic>=2.7.0
+python-dotenv>=1.0.0

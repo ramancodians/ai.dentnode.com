@@ -1,0 +1,113 @@
+name: Deploy Laby Agent to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-laby-agent-prod
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT: app-dentnode-com
+  GCP_REGION: asia-south2
+  ARTIFACT_REGISTRY: asia-south2-docker.pkg.dev
+  ARTIFACT_REPO: dn-dashboard
+  CLOUD_RUN_SERVICE: laby-agent
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt
+          pytest tests/ -v --tb=short
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: gcloud auth configure-docker ${{ env.ARTIFACT_REGISTRY }} --quiet
+
+      - id: image
+        run: |
+          SHA="${{ github.sha }}"
+          IMAGE="${{ env.ARTIFACT_REGISTRY }}/${{ env.GCP_PROJECT }}/${{ env.ARTIFACT_REPO }}/laby-agent:${SHA:0:8}"
+          echo "tag=$IMAGE" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        run: |
+          docker build -t ${{ steps.image.outputs.tag }} -f Dockerfile .
+          docker push ${{ steps.image.outputs.tag }}
+
+      # Internal ingress only: the service is reachable solely from the Node
+      # backend inside the same project/VPC, never the public internet.
+      # Secrets (INTERNAL_API_KEY, DEEPSEEK_API_KEY) are injected from
+      # Secret Manager; no Vertex/ADC needed (DeepSeek is the LLM).
+      - name: Deploy new revision (no traffic)
+        run: |
+          gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
+            --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
+            --image=${{ steps.image.outputs.tag }} \
+            --ingress=internal \
+            --set-env-vars=LABY_MODEL=deepseek/deepseek-chat,NODE_INTERNAL_BASE_URL=https://app.dentnode.com/api \
+            --set-secrets=INTERNAL_API_KEY=LABY_INTERNAL_API_KEY:latest,DEEPSEEK_API_KEY=LABY_DEEPSEEK_API_KEY:latest \
+            --no-traffic --tag=candidate --quiet
+
+      - id: revision
+        run: |
+          REV=$(gcloud run revisions list \
+            --service=${{ env.CLOUD_RUN_SERVICE }} --region=${{ env.GCP_REGION }} \
+            --project=${{ env.GCP_PROJECT }} --sort-by="~DEPLOYED" --limit=1 \
+            --format="value(name)")
+          echo "name=$REV" >> $GITHUB_OUTPUT
+
+      - name: Canary 10% -> health check -> promote to 100%
+        run: |
+          gcloud run services update-traffic ${{ env.CLOUD_RUN_SERVICE }} \
+            --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
+            --to-revisions=${{ steps.revision.outputs.name }}=10
+
+          CANDIDATE_URL=$(gcloud run services describe ${{ env.CLOUD_RUN_SERVICE }} \
+            --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
+            --format="value(status.url)")
+          for i in $(seq 1 6); do
+            STATUS=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 \
+              "${CANDIDATE_URL}/health" || echo "000")
+            echo "Health check $i: HTTP $STATUS"
+            [ "$STATUS" = "200" ] && break
+            [ "$i" = "6" ] && exit 1
+            sleep 10
+          done
+
+          gcloud run services update-traffic ${{ env.CLOUD_RUN_SERVICE }} \
+            --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
+            --to-revisions=${{ steps.revision.outputs.name }}=100
+          echo "Deployed ${{ steps.revision.outputs.name }} to 100%."
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          STABLE=$(gcloud run revisions list \
+            --service=${{ env.CLOUD_RUN_SERVICE }} --region=${{ env.GCP_REGION }} \
+            --project=${{ env.GCP_PROJECT }} --sort-by="~DEPLOYED" --limit=2 \
+            --format="value(name)" | tail -1)
+          [ -n "$STABLE" ] && gcloud run services update-traffic \
+            ${{ env.CLOUD_RUN_SERVICE }} --project=${{ env.GCP_PROJECT }} \
+            --region=${{ env.GCP_REGION }} --to-revisions=${STABLE}=100
+          exit 1
