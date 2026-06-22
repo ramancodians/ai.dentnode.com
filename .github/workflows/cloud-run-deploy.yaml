@@ -95,14 +95,7 @@ jobs:
           for i in $(seq 1 18); do
             READY=$(gcloud run revisions describe "$REV" \
               --region=${{ env.GCP_REGION }} --project=${{ env.GCP_PROJECT }} \
-              --format=json 2>/dev/null \
-              | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-conds = data.get('status', {}).get('conditions', [])
-r = next((c for c in conds if c.get('type') == 'Ready'), {})
-print(r.get('status', 'Unknown'))
-" || echo "Unknown")
+              --format=json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((c.get('status','') for c in d.get('status',{}).get('conditions',[]) if c.get('type')=='Ready'), 'Unknown'))" || echo "Unknown")
             echo "Revision ready check $i/18: $READY"
             [ "$READY" = "True" ] && break
             [ "$i" = "18" ] && { echo "Revision did not become Ready in time."; exit 1; }
