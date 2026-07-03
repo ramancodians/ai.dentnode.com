@@ -70,7 +70,7 @@ jobs:
           gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
             --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
             --image=${{ steps.image.outputs.tag }} \
-            --ingress=internal \
+            --ingress=all \
             --memory=512Mi \
             --set-env-vars=LABY_MODEL=deepseek/deepseek-chat,NODE_INTERNAL_BASE_URL=https://app.dentnode.com/api \
             --set-secrets=INTERNAL_API_KEY=LABY_INTERNAL_API_KEY:latest,DEEPSEEK_API_KEY=LABY_DEEPSEEK_API_KEY:latest \
@@ -85,8 +85,7 @@ jobs:
           echo "name=$REV" >> $GITHUB_OUTPUT
 
       # Poll Cloud Run's own revision readiness instead of curling /health —
-      # the service is --ingress=internal so it's unreachable from GHA runners.
-      # Readiness=True means the container started cleanly and passed its health
+      # even with --ingress=all, the Readiness=True condition check is highly reliable.
       # check, which is equivalent (and more reliable) than an external curl.
       - name: Wait for revision ready then promote to 100%
         run: |

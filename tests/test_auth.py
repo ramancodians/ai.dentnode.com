@@ -17,6 +17,9 @@ def test_missing_key_returns_401(client):
 def test_wrong_key_returns_401(client):
     resp = client.post("/agent/run", json=_BODY, headers={"x-internal-key": "bad-key"})
     assert resp.status_code == 401
+    
+    resp = client.post("/agent/run", json=_BODY, headers={"x-internal-id": "bad-key"})
+    assert resp.status_code == 401
 
 
 def test_correct_key_accepted(client, monkeypatch):
@@ -28,6 +31,9 @@ def test_correct_key_accepted(client, monkeypatch):
     monkeypatch.setattr(server, "run_turn", _mock)
 
     resp = client.post("/agent/run", json=_BODY, headers={"x-internal-key": TEST_KEY})
+    assert resp.status_code == 200
+
+    resp = client.post("/agent/run", json=_BODY, headers={"x-internal-id": TEST_KEY})
     assert resp.status_code == 200
 
 

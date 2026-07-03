@@ -5,7 +5,7 @@ Endpoints:
   POST /agent/run      — run one turn; streams normalized NDJSON events.
 
 This service is internal-only. The Node backend calls /agent/run with the
-shared x-internal-key. It is deployed to Cloud Run with --ingress internal.
+shared x-internal-key or x-internal-id. It is deployed to Cloud Run with --ingress all.
 """
 
 import json
@@ -70,8 +70,10 @@ async def health() -> Dict[str, Any]:
 async def agent_run(
     body: RunRequest,
     x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_internal_id: Optional[str] = Header(default=None, alias="x-internal-id"),
 ) -> StreamingResponse:
-    _require_internal_key(x_internal_key)
+    provided_key = x_internal_key or x_internal_id
+    _require_internal_key(provided_key)
 
     history = [t.model_dump() for t in (body.history or [])]
     t0 = time.monotonic()
