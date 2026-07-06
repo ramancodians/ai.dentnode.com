@@ -42,11 +42,18 @@ class HistoryTurn(BaseModel):
     text: str
 
 
+class MentionItem(BaseModel):
+    id: str
+    name: str
+    role: str
+
+
 class RunRequest(BaseModel):
     lab_id: str = Field(..., min_length=1)
     user_id: str = Field(..., min_length=1)
     question: str = Field(..., min_length=1)
     history: Optional[List[HistoryTurn]] = None
+    mentions: Optional[List[MentionItem]] = None
 
 
 def _require_internal_key(provided: Optional[str]) -> None:
@@ -76,6 +83,7 @@ async def agent_run(
     _require_internal_key(provided_key)
 
     history = [t.model_dump() for t in (body.history or [])]
+    mentions = [m.model_dump() for m in (body.mentions or [])]
     t0 = time.monotonic()
 
     async def event_stream():
@@ -85,6 +93,7 @@ async def agent_run(
                 user_id=body.user_id,
                 question=body.question,
                 history=history,
+                mentions=mentions,
             ):
                 yield json.dumps(event, ensure_ascii=False) + "\n"
         finally:

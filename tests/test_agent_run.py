@@ -51,7 +51,7 @@ def test_run_passes_correct_lab_and_user(client, monkeypatch):
 
     received: dict = {}
 
-    async def _mock(*, lab_id, user_id, question, history=None):
+    async def _mock(*, lab_id, user_id, question, history=None, mentions=None):
         received["lab_id"] = lab_id
         received["user_id"] = user_id
         yield {"type": "done"}
@@ -68,7 +68,7 @@ def test_run_passes_history(client, monkeypatch):
 
     received: dict = {}
 
-    async def _mock(*, lab_id, user_id, question, history=None):
+    async def _mock(*, lab_id, user_id, question, history=None, mentions=None):
         received["history"] = history
         yield {"type": "done"}
 

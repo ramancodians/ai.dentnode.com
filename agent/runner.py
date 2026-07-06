@@ -54,12 +54,30 @@ def _history_to_preamble(history: List[Dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
+def _mentions_to_context(mentions: List[Dict[str, str]]) -> str:
+    """Render @mentions as context for the agent."""
+    if not mentions:
+        return ""
+    lines = ["The user has tagged the following people with @:"]
+    for m in mentions:
+        name = m.get("name", "Unknown")
+        role = m.get("role", "unknown")
+        person_id = m.get("id", "")
+        lines.append(f"  - {name} (role: {role}, id: {person_id})")
+    lines.append(
+        "When the user asks about these people, use find_doctor for doctors "
+        "or the relevant tool for staff. Answer specifically about them."
+    )
+    return "\n".join(lines)
+
+
 async def run_turn(
     *,
     lab_id: str,
     user_id: str,
     question: str,
     history: Optional[List[Dict[str, str]]] = None,
+    mentions: Optional[List[Dict[str, str]]] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """Execute one turn; yields normalized event dicts."""
     # Seed a fresh session with lab_id in state (tools read it from there) and
@@ -71,7 +89,10 @@ async def run_turn(
     )
 
     preamble = _history_to_preamble(history or [])
-    prompt = f"{preamble}\n\nUser: {question}" if preamble else question
+    mention_ctx = _mentions_to_context(mentions or [])
+    parts = [p for p in [preamble, mention_ctx] if p]
+    context = "\n\n".join(parts) if parts else ""
+    prompt = f"{context}\n\nUser: {question}" if context else question
     new_message = genai_types.Content(
         role="user",
         parts=[genai_types.Part(text=prompt)],

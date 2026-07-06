@@ -166,6 +166,49 @@ async def find_doctor(tool_context: ToolContext, query: str, limit: int = 10) ->
     return await _run(tool_context, "find_doctor", {"query": query, "limit": limit})
 
 
+async def find_case(tool_context: ToolContext, query: str, limit: int = 20) -> Dict[str, Any]:
+    """Search for a case/order by ANY identifier.
+
+    Labs use their own custom IDs — NOT internal Prisma IDs. This tool searches
+    ALL known ID fields: case_custom_id, custom_id, order number (#123), book
+    ID, scan ID, internal ID, warranty number, and patient name. It also checks
+    the lab's configured default_id preference and prioritises accordingly.
+
+    Use for: "find case ABC-123", "search order 456", "look up case by book ID",
+    "what is the status of case XYZ", "show me order #500", "find patient
+    John's case", "track case with scan ID STL-789".
+
+    Args:
+        query: The case ID, order number, or patient name to search for.
+            Required.
+        limit: Max results to return (1-100). Defaults to 20.
+    """
+    return await _run(tool_context, "find_case", {"query": query, "limit": limit})
+
+
+async def doctor_financial_analysis(
+    tool_context: ToolContext, doctor_id: str
+) -> Dict[str, Any]:
+    """Full financial health analysis of a single doctor/client.
+
+    Returns revenue contribution %, outstanding payments with aging buckets
+    (0-30, 30-60, 60-90, 90+ days), case volume trend over 3 months, payment
+    behavior (collection rate), risk flags, and a 1-5 risk score.
+
+    Use this when the user asks to "analyze" a doctor's finances, assess risk,
+    or understand their value to the lab. Requires doctor_id — use find_doctor
+    first to get it if the user only provided a name.
+
+    After calling this, use the domain knowledge in your system prompt to
+    interpret the results and recommend actions (collection calls, retention
+    moves, referral asks, etc.).
+
+    Args:
+        doctor_id: The doctor's Prisma ID (from find_doctor). Required.
+    """
+    return await _run(tool_context, "doctor_financial_analysis", {"doctor_id": doctor_id})
+
+
 async def case_status_breakdown(
     tool_context: ToolContext, range: str = "this_month"
 ) -> Dict[str, Any]:
@@ -315,24 +358,156 @@ async def report_directory(tool_context: ToolContext) -> Dict[str, Any]:
     return await _run(tool_context, "report_directory", {})
 
 
+async def dentnode_guide(tool_context: ToolContext, query: str) -> Dict[str, Any]:
+    """Step-by-step guide for using the DentNode product.
+
+    Answers "how do I..." questions: how to create a case, add a doctor,
+    generate an invoice, view reports, manage production, configure settings,
+    use Laby AI, manage shipments and pickups, and more.
+
+    Pass the user's question as `query`. The tool matches against a curated
+    guide database built from real product usage data and returns numbered
+    steps with page paths and screenshot references.
+
+    Use this whenever the user asks how to perform a task in DentNode the
+    product — not for data queries (use other tools for that).
+
+    Args:
+        query: The user's how-to question (e.g. "how do I create a case",
+            "how to add a doctor", "how to view financial reports").
+    """
+    return await _run(tool_context, "dentnode_guide", {"query": query})
+
+
 async def shipment_summary(
     tool_context: ToolContext,
     range: str = "this_month",
     rollup: str = "month",
+    status: Optional[str] = None,
+    shipment_type: Optional[str] = None,
+    is_e_signed: Optional[bool] = None,
+    client_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Shipment / dispatch summary: how many shipments were sent in a period.
+    """Shipment / dispatch count summary with optional filters.
 
-    Use for: "how many shipments did I send", "dispatch report", "monthly
-    dispatch", "shipment register", "how many cases were delivered".
-    Relates to the Shipment Register and Month-wise Dispatch reports.
+    Use for: "how many shipments were created today", "how many shipments
+    from Jan 1 to Jan 15", "how many shipments are delivered", "how many
+    shipments are e-signed", "dispatch report", "monthly dispatch",
+    "shipment register", "how many deliveries vs try-ins".
+
+    Returns a count breakdown (by day or month) plus totals for delivered,
+    in-transit, pending, e-signed, deliveries, and try-ins.
 
     Args:
-        range: "today", "this_week", "last_7_days", "last_30_days",
-            "this_month". Defaults to "this_month".
-        rollup: "day" for daily breakdown, "month" for monthly. Defaults to
-            "month".
+        range: "today", "yesterday", "this_week", "last_7_days",
+            "last_30_days", "this_month". Defaults to "this_month".
+        rollup: "day" for daily breakdown, "month" for monthly. Defaults
+            to "month".
+        status: Optional — filter by SHIPMENT_STATUS (PENDING, IN_TRANSIT,
+            DELIVERED, CANCELLED).
+        shipment_type: Optional — DELIVERY or TRY_IN.
+        is_e_signed: Optional — filter to only signed (true) or unsigned
+            (false) shipments.
+        client_id: Optional — filter to a single doctor/client.
+        from_date: Optional — start of explicit date range (YYYY-MM-DD).
+            Use with to_date instead of range for arbitrary windows.
+        to_date: Optional — end of explicit date range (YYYY-MM-DD).
     """
-    return await _run(tool_context, "shipment_summary", {"range": range, "rollup": rollup})
+    params: Dict[str, Any] = {"range": range, "rollup": rollup}
+    if status:
+        params["status"] = status.upper()
+    if shipment_type:
+        params["shipment_type"] = shipment_type.upper()
+    if is_e_signed is not None:
+        params["is_e_signed"] = str(is_e_signed).lower()
+    if client_id:
+        params["client_id"] = client_id
+    if from_date and to_date:
+        params["from"] = from_date
+        params["to"] = to_date
+    return await _run(tool_context, "shipment_summary", params)
+
+
+async def shipment_list(
+    tool_context: ToolContext,
+    range: str = "this_month",
+    status: Optional[str] = None,
+    shipment_type: Optional[str] = None,
+    is_e_signed: Optional[bool] = None,
+    is_paid: Optional[bool] = None,
+    client_id: Optional[str] = None,
+    tracking_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """List individual shipments with details and rich filtering.
+
+    Use for: "which shipments are delivered this month", "show me shipments
+    signed this week", "list all shipments for Dr. Sharma", "show shipments
+    in transit", "which shipments are pending", "shipment register details",
+    "find shipment by tracking ID", "show paid shipments", "show my shipments".
+
+    Returns a table with shipment ID, date, client, status, type, delivery
+    mode, signed/paid flags, amount, case count, and tracking number.
+
+    Args:
+        range: "today", "yesterday", "this_week", "last_7_days",
+            "last_30_days", "this_month". Defaults to "this_month".
+        status: Optional — PENDING, IN_TRANSIT, DELIVERED, or CANCELLED.
+        shipment_type: Optional — DELIVERY or TRY_IN.
+        is_e_signed: Optional — filter to signed (true) or unsigned (false).
+        is_paid: Optional — filter to paid (true) or unpaid (false).
+        client_id: Optional — filter to a single doctor. Use find_doctor
+            first if the user only provided a name.
+        tracking_id: Optional — partial match on tracking number.
+        from_date: Optional — start of explicit range (YYYY-MM-DD). Use
+            with to_date instead of range.
+        to_date: Optional — end of explicit range (YYYY-MM-DD).
+        limit: Max shipments to return (1-200). Defaults to 20.
+        offset: Pagination offset (default 0).
+    """
+    params: Dict[str, Any] = {"range": range, "limit": limit, "offset": offset}
+    if status:
+        params["status"] = status.upper()
+    if shipment_type:
+        params["shipment_type"] = shipment_type.upper()
+    if is_e_signed is not None:
+        params["is_e_signed"] = str(is_e_signed).lower()
+    if is_paid is not None:
+        params["is_paid"] = str(is_paid).lower()
+    if client_id:
+        params["client_id"] = client_id
+    if tracking_id:
+        params["tracking_id"] = tracking_id
+    if from_date and to_date:
+        params["from"] = from_date
+        params["to"] = to_date
+    return await _run(tool_context, "shipment_list", params)
+
+
+async def shipment_detail(
+    tool_context: ToolContext, shipment_id: str
+) -> Dict[str, Any]:
+    """Full detail of a single shipment by ID.
+
+    Use for: "tell me about shipment SHP-123", "show shipment details",
+    "what cases are in this shipment", "who signed shipment #25",
+    "shipment tracking info", "show me the details of that shipment".
+
+    Returns all shipment fields (status, type, amounts, dates, delivery
+    info, e-signature status) plus the list of cases inside it with patient
+    names, product types, tooth numbers, and shades. Also includes client
+    and staff info.
+
+    Args:
+        shipment_id: The shipment's custom_id (e.g. "SHP-001") or internal
+            Prisma ID. Required.
+    """
+    return await _run(tool_context, "shipment_detail", {"shipment_id": shipment_id})
 
 
 async def expense_summary(
@@ -450,10 +625,124 @@ async def technician_activity(
     return await _run(tool_context, "technician_activity", {"range": range})
 
 
+async def workflow_summary(tool_context: ToolContext) -> Dict[str, Any]:
+    """Overview of all Workflow V2 automations set up in the lab.
+
+    Lists every workflow with its name, manager, covered products, and counts of
+    active/pending/completed/failed automation tasks. Use for: "how many
+    workflows do I have", "show all workflows", "workflow overview", "list
+    automations", "what workflows are set up".
+
+    No parameters needed.
+    """
+    return await _run(tool_context, "workflow_summary", {})
+
+
+async def workflow_find_case(
+    tool_context: ToolContext, case_id: str
+) -> Dict[str, Any]:
+    """Find where a specific case/order is in its Workflow V2 automation.
+
+    Tells you: which workflow the case is in, current step name and type
+    (e.g. "Milling", "Quality Check"), who is assigned, how many steps are
+    completed vs total, whether it's delayed (stalled > 24h), and recent
+    task log events showing progress.
+
+    Use for: "where is case ABC-123 in the workflow", "who is working on case
+    XYZ", "is case #500 delayed in the workflow", "what step is case DN-001
+    on", "show workflow progress for this order", "which department is
+    handling case 456".
+
+    Args:
+        case_id: The case identifier — case_custom_id, custom_id, or order
+            number. Required. Use find_case first if the user only provides
+            a patient name.
+    """
+    return await _run(tool_context, "workflow_find_case", {"case_id": case_id})
+
+
+async def whatsapp_status(tool_context: ToolContext) -> Dict[str, Any]:
+    """Check WhatsApp setup and credit status for the lab.
+
+    Returns: whether a WhatsApp account is linked and active, remaining message
+    credits, cost per template message, cost per custom text message, and how
+    many messages can be sent with current credits. ALWAYS call this first
+    before attempting to send any WhatsApp message.
+
+    Use for: "do I have WhatsApp credits", "check WhatsApp balance",
+    "am I linked to WhatsApp", "how many messages can I send".
+
+    No parameters needed.
+    """
+    return await _run(tool_context, "whatsapp_status", {})
+
+
+async def whatsapp_templates(tool_context: ToolContext) -> Dict[str, Any]:
+    """List all available WhatsApp message templates with their purpose,
+    parameter count, and body preview.
+
+    Use this when the user wants to send a message but isn't sure which
+    template to use. Show them the options and let them pick. Templates
+    cost fewer credits than custom text messages.
+
+    Use for: "what templates are available", "show message templates",
+    "what can I send on WhatsApp", "list WhatsApp templates".
+
+    No parameters needed.
+    """
+    return await _run(tool_context, "whatsapp_templates", {})
+
+
+async def whatsapp_send(
+    tool_context: ToolContext,
+    doctor_id: str,
+    template_name: Optional[str] = None,
+    body_params: Optional[List[str]] = None,
+    custom_body: Optional[str] = None,
+    entry_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Send a WhatsApp message to a doctor/client.
+
+    Can send either a pre-built template (payment reminder, case update,
+    invoice, etc.) or a custom free-text message. Custom text costs more
+    credits. ALWAYS call whatsapp_status first to verify credits, and
+    confirm the message content with the user before sending.
+
+    Templates cost 1 credit (linked account) or 3 credits (DentNode
+    fallback). Custom text messages cost 1 credit (linked) or 6 credits
+    (fallback).
+
+    Use for: "send payment reminder to Dr. Sharma", "send case update
+    to this doctor", "message Dr. Gupta about his invoice", "send a
+    WhatsApp to confirm the case is ready".
+
+    Args:
+        doctor_id: The doctor's ID (use find_doctor first). Required.
+        template_name: Template name from whatsapp_templates. Optional
+            if sending custom_body.
+        body_params: List of values for template {{1}}, {{2}}, etc.
+            Optional.
+        custom_body: Custom text message body. Optional — use instead
+            of template_name. Costs more credits.
+        entry_id: Optional — link the message to a specific case.
+    """
+    params: Dict[str, Any] = {"doctor_id": doctor_id}
+    if template_name:
+        params["template_name"] = template_name
+    if body_params:
+        params["body_params"] = body_params
+    if custom_body:
+        params["custom_body"] = custom_body
+    if entry_id:
+        params["entry_id"] = entry_id
+    return await _run(tool_context, "whatsapp_send", params)
+
+
 # Registered, in priority order, with the LlmAgent.
 LABY_TOOLS = [
     # Meta / navigation
     report_directory,
+    dentnode_guide,
     # Phase 0 (original)
     cases_received,
     cases_timeline,
@@ -465,6 +754,7 @@ LABY_TOOLS = [
     lab_overview,
     doctor_list,
     find_doctor,
+    find_case,
     case_status_breakdown,
     delayed_cases,
     outstanding_payments,
@@ -475,8 +765,11 @@ LABY_TOOLS = [
     turnaround_time,
     busy_day_analysis,
     rejection_rate,
+    doctor_financial_analysis,
     # Phase 3 — report-aligned tools
     shipment_summary,
+    shipment_list,
+    shipment_detail,
     expense_summary,
     payment_mode_breakdown,
     daily_order_activity,
@@ -484,4 +777,7 @@ LABY_TOOLS = [
     pickup_summary,
     stock_summary,
     technician_activity,
+    # Phase 4 — workflow automation
+    workflow_summary,
+    workflow_find_case,
 ]
