@@ -23,9 +23,14 @@ def _lab_id(tool_context: ToolContext) -> str:
     return str(lab_id)
 
 
+def _user_id(tool_context: ToolContext) -> Optional[str]:
+    user_id = (tool_context.state or {}).get("user_id")
+    return str(user_id) if user_id else None
+
+
 async def _run(tool_context: ToolContext, name: str, params: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        return await call_tool(name, _lab_id(tool_context), params)
+        return await call_tool(name, _lab_id(tool_context), params, user_id=_user_id(tool_context))
     except NodeToolError as exc:
         # Returned to the model as a normal result so it can apologise/retry
         # rather than crashing the turn.
@@ -695,13 +700,14 @@ async def whatsapp_templates(tool_context: ToolContext) -> Dict[str, Any]:
 
 async def whatsapp_send(
     tool_context: ToolContext,
-    doctor_id: str,
+    doctor_id: Optional[str] = None,
+    recipient: str = "doctor",
     template_name: Optional[str] = None,
     body_params: Optional[List[str]] = None,
     custom_body: Optional[str] = None,
     entry_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Send a WhatsApp message to a doctor/client.
+    """Send a WhatsApp message to a doctor/client, OR to the logged-in user.
 
     Can send either a pre-built template (payment reminder, case update,
     invoice, etc.) or a custom free-text message. Custom text costs more
@@ -710,14 +716,19 @@ async def whatsapp_send(
 
     Templates cost 1 credit (linked account) or 3 credits (DentNode
     fallback). Custom text messages cost 1 credit (linked) or 6 credits
-    (fallback).
+    (fallback). Sending to yourself costs the same as sending to a doctor.
 
     Use for: "send payment reminder to Dr. Sharma", "send case update
     to this doctor", "message Dr. Gupta about his invoice", "send a
-    WhatsApp to confirm the case is ready".
+    WhatsApp to confirm the case is ready", "send it to me", "send that
+    to my number".
 
     Args:
-        doctor_id: The doctor's ID (use find_doctor first). Required.
+        doctor_id: The doctor's ID (use find_doctor first). Required when
+            recipient is "doctor" (the default). Not needed when recipient
+            is "self"/"me".
+        recipient: "doctor" (default) to send to the doctor_id above, or
+            "self"/"me" to send to the logged-in user's own phone on file.
         template_name: Template name from whatsapp_templates. Optional
             if sending custom_body.
         body_params: List of values for template {{1}}, {{2}}, etc.
@@ -726,7 +737,9 @@ async def whatsapp_send(
             of template_name. Costs more credits.
         entry_id: Optional — link the message to a specific case.
     """
-    params: Dict[str, Any] = {"doctor_id": doctor_id}
+    params: Dict[str, Any] = {"recipient": recipient}
+    if doctor_id:
+        params["doctor_id"] = doctor_id
     if template_name:
         params["template_name"] = template_name
     if body_params:
@@ -736,6 +749,104 @@ async def whatsapp_send(
     if entry_id:
         params["entry_id"] = entry_id
     return await _run(tool_context, "whatsapp_send", params)
+
+
+# ----------------------------------------------------------------
+# Phase 6 — Actions (draft-first, strictly one action per call)
+# ----------------------------------------------------------------
+
+
+async def shipment_create(
+    tool_context: ToolContext,
+    doctor_id: str,
+    case_ids: Optional[List[str]] = None,
+    delivery_type: str = "IN_HOUSE",
+    shipment_type: str = "DELIVERY",
+    amount: Optional[int] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Create ONE shipment for a SINGLE doctor. DRAFT-FIRST, ONE AT A TIME.
+
+    confirm=false (the default) resolves the doctor's shippable cases and
+    the computed amount, and returns a PREVIEW ONLY — it creates nothing.
+    Only call again with confirm=true, AFTER showing the draft to the user
+    and getting their explicit go-ahead, to actually create the shipment.
+
+    NEVER create more than one shipment per user request. If the user asks
+    for shipments for "all doctors" or "20 shipments", refuse and explain
+    you can only create one shipment at a time — ask them to pick one
+    doctor.
+
+    Use for: "create a shipment for Dr. Sharma", "ship Dr. Gupta's cases",
+    "make a try-in shipment for Dr. X".
+
+    Args:
+        doctor_id: The doctor to ship for (use find_doctor first). Required.
+        case_ids: Optional — specific case IDs to include. If omitted, all
+            of that doctor's cases ready to ship (not already shipped,
+            delivered, or cancelled) are included automatically.
+        delivery_type: "IN_HOUSE" or "COURIER". Defaults to "IN_HOUSE".
+        shipment_type: "DELIVERY" or "TRY_IN". Defaults to "DELIVERY".
+        amount: Optional — override the auto-computed amount.
+        confirm: False (default) previews the draft only. True actually
+            creates the shipment. NEVER set true without first showing the
+            draft and getting the user's explicit confirmation.
+    """
+    params: Dict[str, Any] = {
+        "doctor_id": doctor_id,
+        "delivery_type": delivery_type,
+        "shipment_type": shipment_type,
+        "confirm": confirm,
+    }
+    if case_ids:
+        params["case_ids"] = case_ids
+    if amount is not None:
+        params["amount"] = amount
+    return await _run(tool_context, "shipment_create", params)
+
+
+async def warranty_create(
+    tool_context: ToolContext,
+    entry_id: Optional[str] = None,
+    doctor_id: Optional[str] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Create ONE warranty card (with a real PDF) for a SINGLE case.
+    DRAFT-FIRST, ONE AT A TIME.
+
+    confirm=false (the default) resolves the case and returns a PREVIEW of
+    the patient, doctor, work, warranty number, and valid-until date — it
+    generates NOTHING. Only call again with confirm=true, AFTER showing the
+    draft and getting the user's explicit go-ahead, to actually render and
+    store the PDF.
+
+    On confirm=true this produces a downloadable PDF. Tell the user
+    afterwards that they can download it or send it to the doctor / to
+    themselves on WhatsApp.
+
+    NEVER create more than one warranty card per user request.
+
+    Use for: "create a warranty card for case 1234", "generate a warranty
+    card for Dr. Sharma's newest case", "make an e-warranty card".
+
+    Args:
+        entry_id: The case to generate a warranty card for (use find_case
+            first if the user gave a name or partial ID). Provide this OR
+            doctor_id.
+        doctor_id: If entry_id is omitted, resolves to that doctor's NEWEST
+            case (use find_doctor first). If the case is ambiguous, the
+            tool returns candidates — confirm with the user which case they
+            mean before calling again.
+        confirm: False (default) previews the draft only. True actually
+            renders and stores the PDF. NEVER set true without first
+            showing the draft and getting the user's explicit confirmation.
+    """
+    params: Dict[str, Any] = {"confirm": confirm}
+    if entry_id:
+        params["entry_id"] = entry_id
+    if doctor_id:
+        params["doctor_id"] = doctor_id
+    return await _run(tool_context, "warranty_create", params)
 
 
 # Registered, in priority order, with the LlmAgent.
@@ -784,4 +895,7 @@ LABY_TOOLS = [
     whatsapp_status,
     whatsapp_templates,
     whatsapp_send,
+    # Phase 6 — Actions (draft-first, one action at a time)
+    shipment_create,
+    warranty_create,
 ]

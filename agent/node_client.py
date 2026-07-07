@@ -30,14 +30,19 @@ async def call_tool(
     tool_name: str,
     lab_id: str,
     params: Dict[str, Any],
+    user_id: str | None = None,
 ) -> Dict[str, Any]:
     """Invoke a single curated tool on the Node backend.
 
     Returns the tool's `result` envelope: {summary, columns, rows, chart_hint, notes}.
     Raises NodeToolError on transport or server failure so the agent can recover.
+
+    `user_id` is the trusted, session-derived caller id (never model-supplied)
+    used by tools like whatsapp_send(recipient="self") that need to resolve
+    the logged-in user rather than a doctor.
     """
     url = f"{settings.node_base_url}/internal/laby-tools/{tool_name}"
-    payload = {"labId": lab_id, "params": params or {}}
+    payload = {"labId": lab_id, "params": params or {}, "userId": user_id}
     headers = {
         "x-internal-key": settings.internal_key,
         "Content-Type": "application/json",
