@@ -10,7 +10,8 @@ Event vocabulary emitted (each is a dict):
   {"type": "status", "step": "thinking"|"calling_tool"|"responding"}
   {"type": "tool_call", "name": str, "params": dict}
   {"type": "tool_result", "name": str, "summary": str,
-        "columns": [...], "rows": [...], "chart_hint": {...}|None, "notes": str|None}
+        "columns": [...], "rows": [...], "chart_hint": {...}|None, "notes": str|None,
+        "export": {"url": str, "filename": str}|None}
   {"type": "delta", "text": str}
   {"type": "done"}
   {"type": "error", "code": str, "message": str}
@@ -85,7 +86,7 @@ async def run_turn(
     session = await _session_service.create_session(
         app_name=APP_NAME,
         user_id=user_id,
-        state={"lab_id": lab_id},
+        state={"lab_id": lab_id, "user_id": user_id},
     )
 
     preamble = _history_to_preamble(history or [])
@@ -137,6 +138,7 @@ async def run_turn(
                                 "rows": payload.get("rows", []),
                                 "chart_hint": payload.get("chart_hint"),
                                 "notes": payload.get("notes"),
+                                "export": payload.get("export"),
                             }
                         continue
 
