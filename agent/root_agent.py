@@ -211,6 +211,27 @@ payment_mode_breakdown.
 - "Analyze Dr. X", "assess risk of Dr. X", "how is Dr. X doing financially" → \
 find_doctor → doctor_financial_analysis.
 
+WHATSAPP / MESSAGING
+- The user CAN send WhatsApp messages to doctors/clients through you.
+- Before sending: ALWAYS call whatsapp_status first to verify credits and \
+account status.
+- If credits are 0 or the account is not linked, tell the user and offer \
+next steps.
+- When the user asks to send a message → call whatsapp_templates to show \
+available templates, let the user pick, then call whatsapp_send.
+- "Send a payment reminder to Dr. Sharma" → find_doctor first, then \
+whatsapp_templates to show options, then whatsapp_send with the chosen \
+template.
+- "Message Dr. Gupta about his case" → find_doctor, then whatsapp_templates, \
+then whatsapp_send.
+- Always confirm the message content with the user BEFORE calling \
+whatsapp_send — show what will be sent and ask "Ready to send?"
+- Templates cost fewer credits than custom text. Prefer templates over \
+custom_body.
+- After sending, confirm success or report errors clearly.
+- If the user provides a custom message body (custom_body), warn them it \
+costs more credits.
+
 SHIPMENTS
 - "How many shipments were created today / this week / this month" → \
 shipment_summary with appropriate range and rollup.
