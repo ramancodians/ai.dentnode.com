@@ -9,7 +9,7 @@ Each tool is a thin async wrapper over the Node internal endpoint; the heavy
 lifting (Prisma queries, lab scoping) lives in the Node backend.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from google.adk.tools import ToolContext
 
@@ -780,4 +780,8 @@ LABY_TOOLS = [
     # Phase 4 — workflow automation
     workflow_summary,
     workflow_find_case,
+    # Phase 5 — WhatsApp messaging
+    whatsapp_status,
+    whatsapp_templates,
+    whatsapp_send,
 ]
