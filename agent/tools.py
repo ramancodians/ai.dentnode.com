@@ -163,6 +163,11 @@ async def find_doctor(tool_context: ToolContext, query: str, limit: int = 10) ->
     If several people match, the result lists them so you can ask the user which
     one they mean. If nothing matches, say so and offer to list all doctors.
 
+    The result includes an entity_ids field mapping each row to that doctor's
+    internal id. You normally don't need it — the action tools take a
+    doctor_name — but you may pass a row's id to an action tool as doctor_id
+    once you've picked the right doctor. NEVER show these ids to the user.
+
     Args:
         query: The name / clinic / phone the user mentioned (titles like "dr"
             are fine — they are stripped automatically). Required.
@@ -183,6 +188,11 @@ async def find_case(tool_context: ToolContext, query: str, limit: int = 20) -> D
     "what is the status of case XYZ", "show me order #500", "find patient
     John's case", "track case with scan ID STL-789".
 
+    The result includes an entity_ids field mapping each row to that case's
+    internal id. You may pass a row's id to warranty_create as entry_id once
+    you've picked the right case. NEVER show these ids to the user — refer to
+    cases by their case_custom_id.
+
     Args:
         query: The case ID, order number, or patient name to search for.
             Required.
@@ -192,7 +202,10 @@ async def find_case(tool_context: ToolContext, query: str, limit: int = 20) -> D
 
 
 async def doctor_financial_analysis(
-    tool_context: ToolContext, doctor_id: str
+    tool_context: ToolContext,
+    doctor_name: Optional[str] = None,
+    doctor_clinic: Optional[str] = None,
+    doctor_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Full financial health analysis of a single doctor/client.
 
@@ -201,17 +214,33 @@ async def doctor_financial_analysis(
     behavior (collection rate), risk flags, and a 1-5 risk score.
 
     Use this when the user asks to "analyze" a doctor's finances, assess risk,
-    or understand their value to the lab. Requires doctor_id — use find_doctor
-    first to get it if the user only provided a name.
+    or understand their value to the lab.
+
+    Pass doctor_name — the name the user said (e.g. "Dr. Sharma"); the tool
+    resolves the doctor internally. Add doctor_clinic when several doctors share
+    a name. If the tool reports the name is ambiguous, ask the user which one
+    and call again with the clinic. You do NOT need an internal id — but if a
+    prior find_doctor gave you the matching entity_ids value, you may pass it as
+    doctor_id instead. Never show that id to the user.
 
     After calling this, use the domain knowledge in your system prompt to
     interpret the results and recommend actions (collection calls, retention
     moves, referral asks, etc.).
 
     Args:
-        doctor_id: The doctor's Prisma ID (from find_doctor). Required.
+        doctor_name: The doctor's name as the user said it. Preferred input.
+        doctor_clinic: Optional clinic name to disambiguate same-named doctors.
+        doctor_id: Optional internal id from a lookup's entity_ids, if you
+            already have it. Never surface it to the user.
     """
-    return await _run(tool_context, "doctor_financial_analysis", {"doctor_id": doctor_id})
+    params: Dict[str, Any] = {}
+    if doctor_name:
+        params["doctor_name"] = doctor_name
+    if doctor_clinic:
+        params["doctor_clinic"] = doctor_clinic
+    if doctor_id:
+        params["doctor_id"] = doctor_id
+    return await _run(tool_context, "doctor_financial_analysis", params)
 
 
 async def case_status_breakdown(
@@ -758,7 +787,9 @@ async def whatsapp_send(
 
 async def shipment_create(
     tool_context: ToolContext,
-    doctor_id: str,
+    doctor_name: Optional[str] = None,
+    doctor_clinic: Optional[str] = None,
+    doctor_id: Optional[str] = None,
     case_ids: Optional[List[str]] = None,
     delivery_type: str = "IN_HOUSE",
     shipment_type: str = "DELIVERY",
@@ -772,6 +803,11 @@ async def shipment_create(
     Only call again with confirm=true, AFTER showing the draft to the user
     and getting their explicit go-ahead, to actually create the shipment.
 
+    Pass doctor_name — the name the user said; the tool resolves the doctor
+    internally (add doctor_clinic to disambiguate same-named doctors). You do
+    NOT need an internal id. If the tool reports the name is ambiguous, ask the
+    user which doctor and call again with the clinic.
+
     NEVER create more than one shipment per user request. If the user asks
     for shipments for "all doctors" or "20 shipments", refuse and explain
     you can only create one shipment at a time — ask them to pick one
@@ -781,7 +817,12 @@ async def shipment_create(
     "make a try-in shipment for Dr. X".
 
     Args:
-        doctor_id: The doctor to ship for (use find_doctor first). Required.
+        doctor_name: The doctor to ship for, as the user named them. Preferred
+            input — use find_doctor first only if you need to confirm they
+            exist.
+        doctor_clinic: Optional clinic name to disambiguate same-named doctors.
+        doctor_id: Optional internal id from a lookup's entity_ids, if you
+            already have it. Never surface it to the user.
         case_ids: Optional — specific case IDs to include. If omitted, all
             of that doctor's cases ready to ship (not already shipped,
             delivered, or cancelled) are included automatically.
@@ -793,11 +834,16 @@ async def shipment_create(
             draft and getting the user's explicit confirmation.
     """
     params: Dict[str, Any] = {
-        "doctor_id": doctor_id,
         "delivery_type": delivery_type,
         "shipment_type": shipment_type,
         "confirm": confirm,
     }
+    if doctor_name:
+        params["doctor_name"] = doctor_name
+    if doctor_clinic:
+        params["doctor_clinic"] = doctor_clinic
+    if doctor_id:
+        params["doctor_id"] = doctor_id
     if case_ids:
         params["case_ids"] = case_ids
     if amount is not None:
@@ -808,6 +854,8 @@ async def shipment_create(
 async def warranty_create(
     tool_context: ToolContext,
     entry_id: Optional[str] = None,
+    doctor_name: Optional[str] = None,
+    doctor_clinic: Optional[str] = None,
     doctor_id: Optional[str] = None,
     confirm: bool = False,
 ) -> Dict[str, Any]:
@@ -830,13 +878,15 @@ async def warranty_create(
     card for Dr. Sharma's newest case", "make an e-warranty card".
 
     Args:
-        entry_id: The case to generate a warranty card for (use find_case
-            first if the user gave a name or partial ID). Provide this OR
-            doctor_id.
-        doctor_id: If entry_id is omitted, resolves to that doctor's NEWEST
-            case (use find_doctor first). If the case is ambiguous, the
-            tool returns candidates — confirm with the user which case they
-            mean before calling again.
+        entry_id: The case to generate a warranty card for. Use the lab's
+            case ID (case_custom_id) from find_case, or the internal id from
+            find_case's entity_ids. Provide this OR a doctor.
+        doctor_name: If entry_id is omitted, the doctor's name as the user
+            said it — resolves to that doctor's NEWEST case. Add doctor_clinic
+            to disambiguate same-named doctors.
+        doctor_clinic: Optional clinic name to disambiguate same-named doctors.
+        doctor_id: Optional internal id from a lookup's entity_ids, if you
+            already have it. Never surface it to the user.
         confirm: False (default) previews the draft only. True actually
             renders and stores the PDF. NEVER set true without first
             showing the draft and getting the user's explicit confirmation.
@@ -844,6 +894,10 @@ async def warranty_create(
     params: Dict[str, Any] = {"confirm": confirm}
     if entry_id:
         params["entry_id"] = entry_id
+    if doctor_name:
+        params["doctor_name"] = doctor_name
+    if doctor_clinic:
+        params["doctor_clinic"] = doctor_clinic
     if doctor_id:
         params["doctor_id"] = doctor_id
     return await _run(tool_context, "warranty_create", params)
