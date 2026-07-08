@@ -56,20 +56,39 @@ def _history_to_preamble(history: List[Dict[str, str]]) -> str:
 
 
 def _mentions_to_context(mentions: List[Dict[str, str]]) -> str:
-    """Render @mentions as context for the agent."""
+    """Render @mentions as context for the agent.
+
+    IMPORTANT: never put the internal person id in the prompt text — the model
+    tends to parrot it back to the user (e.g. "ID: clwqhjk..."). We surface only
+    the name and role here; the id (if ever needed) lives in session state.
+    """
     if not mentions:
         return ""
     lines = ["The user has tagged the following people with @:"]
     for m in mentions:
         name = m.get("name", "Unknown")
         role = m.get("role", "unknown")
-        person_id = m.get("id", "")
-        lines.append(f"  - {name} (role: {role}, id: {person_id})")
+        lines.append(f"  - {name} (role: {role})")
     lines.append(
         "When the user asks about these people, use find_doctor for doctors "
         "or the relevant tool for staff. Answer specifically about them."
     )
     return "\n".join(lines)
+
+
+def _mentions_to_state(mentions: List[Dict[str, str]]) -> Dict[str, str]:
+    """Map tagged people's names to their internal ids for session state.
+
+    Kept OUT of the prompt (see _mentions_to_context) so the id never leaks into
+    model-visible text, while still being available to tools if needed later.
+    """
+    state: Dict[str, str] = {}
+    for m in mentions:
+        name = (m.get("name") or "").strip().lower()
+        person_id = (m.get("id") or "").strip()
+        if name and person_id:
+            state[name] = person_id
+    return state
 
 
 async def run_turn(
@@ -83,10 +102,17 @@ async def run_turn(
     """Execute one turn; yields normalized event dicts."""
     # Seed a fresh session with lab_id in state (tools read it from there) and
     # the recent history as initial context.
+    session_state: Dict[str, Any] = {"lab_id": lab_id, "user_id": user_id}
+    mention_state = _mentions_to_state(mentions or [])
+    if mention_state:
+        # Tagged people's ids, keyed by lowercased name — available to tools,
+        # never rendered into the prompt (see _mentions_to_context).
+        session_state["mentioned_people"] = mention_state
+
     session = await _session_service.create_session(
         app_name=APP_NAME,
         user_id=user_id,
-        state={"lab_id": lab_id, "user_id": user_id},
+        state=session_state,
     )
 
     preamble = _history_to_preamble(history or [])
@@ -139,6 +165,7 @@ async def run_turn(
                                 "chart_hint": payload.get("chart_hint"),
                                 "notes": payload.get("notes"),
                                 "export": payload.get("export"),
+                                "entity_ids": payload.get("entity_ids"),
                             }
                         continue
 
