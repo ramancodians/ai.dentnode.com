@@ -193,10 +193,12 @@ async def run_turn(
             extra={"lab_id": lab_id, "error": str(exc)},
             exc_info=True,
         )
+        # Full detail is in the log above — never leak raw exception text
+        # (stack internals, provider errors, URLs) to the end user.
         yield {
             "type": "error",
             "code": "AGENT_FAILED",
-            "message": f"Laby could not complete that request: {exc}",
+            "message": "Laby could not complete that request. Please try again.",
         }
 
 

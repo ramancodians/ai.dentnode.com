@@ -28,6 +28,28 @@ def _user_id(tool_context: ToolContext) -> Optional[str]:
     return str(user_id) if user_id else None
 
 
+#: Named ranges resolved server-side (services/labyTools/dateRange.ts).
+RANGE_VALUES = (
+    '"today", "yesterday", "tomorrow", "this_week", "last_7_days", '
+    '"last_30_days", "this_month", "last_month", "last_3_months", '
+    '"last_6_months", "this_year", "last_year", "all_time"'
+)
+
+
+def _range_params(
+    range: str, from_date: Optional[str] = None, to_date: Optional[str] = None
+) -> Dict[str, Any]:
+    """Build the range param, preferring an explicit from/to window.
+
+    Node's resolveRange accepts either a named keyword or {from, to} — an
+    explicit window covers questions like "in june" or "from Jan 1 to Jan 15"
+    that no named range matches.
+    """
+    if from_date and to_date:
+        return {"range": {"from": from_date, "to": to_date}}
+    return {"range": range}
+
+
 async def _run(tool_context: ToolContext, name: str, params: Dict[str, Any]) -> Dict[str, Any]:
     try:
         return await call_tool(name, _lab_id(tool_context), params, user_id=_user_id(tool_context))
@@ -43,16 +65,30 @@ async def _run(tool_context: ToolContext, name: str, params: Dict[str, Any]) -> 
         }
 
 
-async def cases_received(tool_context: ToolContext, range: str = "today") -> Dict[str, Any]:
+async def cases_received(
+    tool_context: ToolContext,
+    range: str = "today",
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> Dict[str, Any]:
     """How many NEW cases the lab received, broken down by day.
 
-    Use for: "how many cases did I receive today / this week / this month".
+    Use for: "how many cases did I receive today / this week / this month /
+    in the last 3 months / in june".
 
     Args:
         range: One of "today", "yesterday", "this_week", "last_7_days",
-            "last_30_days", "this_month". Defaults to "today".
+            "last_30_days", "this_month", "last_month", "last_3_months",
+            "last_6_months", "this_year", "last_year", "all_time".
+            Defaults to "today".
+        from_date: Optional explicit start (YYYY-MM-DD). Use WITH to_date
+            for arbitrary windows like a specific month ("in june" →
+            2026-06-01 to 2026-06-30). Overrides range.
+        to_date: Optional explicit end (YYYY-MM-DD).
     """
-    return await _run(tool_context, "cases_received", {"range": range})
+    return await _run(
+        tool_context, "cases_received", _range_params(range, from_date, to_date)
+    )
 
 
 async def cases_timeline(tool_context: ToolContext, weeks: int = 3) -> Dict[str, Any]:
@@ -95,29 +131,50 @@ async def inactive_clients(
 
 
 async def product_sales(
-    tool_context: ToolContext, range: str = "this_month", top_n: int = 10
+    tool_context: ToolContext,
+    range: str = "this_month",
+    top_n: int = 10,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Best-selling products/services by revenue and units, ranked.
 
-    Use for: "which products are selling more", "top products this month".
+    Use for: "which products are selling more", "top products this month",
+    "highest selling product in june" (use from_date/to_date for a specific
+    month), "best seller last month".
 
     Args:
-        range: "today", "this_week", "last_7_days", "last_30_days",
-            "this_month". Defaults to "this_month".
+        range: One of "today", "yesterday", "this_week", "last_7_days",
+            "last_30_days", "this_month", "last_month", "last_3_months",
+            "last_6_months", "this_year", "last_year", "all_time".
+            Defaults to "this_month".
         top_n: Max products to return. Defaults to 10.
+        from_date: Optional explicit start (YYYY-MM-DD), with to_date.
+            Overrides range.
+        to_date: Optional explicit end (YYYY-MM-DD).
     """
-    return await _run(tool_context, "product_sales", {"range": range, "top_n": top_n})
+    params = _range_params(range, from_date, to_date)
+    params["top_n"] = top_n
+    return await _run(tool_context, "product_sales", params)
 
 
-async def staff_activity(tool_context: ToolContext, days: int = 7) -> Dict[str, Any]:
-    """Staff who have NOT logged in / been active in the last N days.
+async def staff_activity(
+    tool_context: ToolContext, days: int = 7, mode: str = "inactive"
+) -> Dict[str, Any]:
+    """Staff login/activity health — inactive OR active staff lists.
 
-    Use for: "which staff are not logging in properly", "who's been inactive".
+    mode="inactive" (default): staff who have NOT logged in in the last N
+    days. Use for: "which staff are not logging in properly", "who's been
+    inactive".
+    mode="active": staff who HAVE been active within the last N days. Use
+    for: "which staff are logged in", "who is active", "who logged in today"
+    (days=1).
 
     Args:
-        days: Inactivity threshold in days. Defaults to 7.
+        days: Threshold in days. Defaults to 7.
+        mode: "inactive" (default) or "active".
     """
-    return await _run(tool_context, "staff_activity", {"days": days})
+    return await _run(tool_context, "staff_activity", {"days": days, "mode": mode})
 
 
 # ----------------------------------------------------------------
@@ -244,7 +301,10 @@ async def doctor_financial_analysis(
 
 
 async def case_status_breakdown(
-    tool_context: ToolContext, range: str = "this_month"
+    tool_context: ToolContext,
+    range: str = "this_month",
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Distribution of cases by status in a date range.
 
@@ -252,10 +312,17 @@ async def case_status_breakdown(
     "how many completed", "case status summary".
 
     Args:
-        range: "today", "this_week", "last_7_days", "last_30_days",
-            "this_month". Defaults to "this_month".
+        range: One of "today", "yesterday", "this_week", "last_7_days",
+            "last_30_days", "this_month", "last_month", "last_3_months",
+            "last_6_months", "this_year", "last_year", "all_time".
+            Defaults to "this_month".
+        from_date: Optional explicit start (YYYY-MM-DD), with to_date.
+            Overrides range.
+        to_date: Optional explicit end (YYYY-MM-DD).
     """
-    return await _run(tool_context, "case_status_breakdown", {"range": range})
+    return await _run(
+        tool_context, "case_status_breakdown", _range_params(range, from_date, to_date)
+    )
 
 
 async def delayed_cases(tool_context: ToolContext, top_n: int = 20) -> Dict[str, Any]:
@@ -305,18 +372,28 @@ async def patient_count(tool_context: ToolContext) -> Dict[str, Any]:
 
 
 async def revenue_summary(
-    tool_context: ToolContext, range: str = "this_month"
+    tool_context: ToolContext,
+    range: str = "this_month",
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Revenue summary: billed, collected, outstanding, invoices for a period.
 
     Use for: "what is my total revenue", "revenue this month", "how much did I
-    bill", "how much did I collect".
+    bill", "how much did I collect", "billing yesterday", "sales in feb".
 
     Args:
-        range: "today", "this_week", "last_7_days", "last_30_days",
-            "this_month". Defaults to "this_month".
+        range: One of "today", "yesterday", "this_week", "last_7_days",
+            "last_30_days", "this_month", "last_month", "last_3_months",
+            "last_6_months", "this_year", "last_year", "all_time".
+            Defaults to "this_month".
+        from_date: Optional explicit start (YYYY-MM-DD), with to_date.
+            Overrides range.
+        to_date: Optional explicit end (YYYY-MM-DD).
     """
-    return await _run(tool_context, "revenue_summary", {"range": range})
+    return await _run(
+        tool_context, "revenue_summary", _range_params(range, from_date, to_date)
+    )
 
 
 async def month_over_month(
@@ -556,8 +633,10 @@ async def expense_summary(
     Relates to the Expenses List and Monthly Expenses reports.
 
     Args:
-        range: "today", "this_week", "last_7_days", "last_30_days",
-            "this_month". Defaults to "this_month".
+        range: One of "today", "yesterday", "this_week", "last_7_days",
+            "last_30_days", "this_month", "last_month", "last_3_months",
+            "last_6_months", "this_year", "last_year", "all_time".
+            Defaults to "this_month".
         rollup: "day" or "month". Defaults to "month".
     """
     return await _run(tool_context, "expense_summary", {"range": range, "rollup": rollup})
@@ -570,12 +649,14 @@ async def payment_mode_breakdown(
     """Payments collected broken down by mode: Cash, UPI, Card, Cheque, etc.
 
     Use for: "how much cash did I collect", "payment mode summary", "UPI vs
-    cash collections", "how are payments coming in".
+    cash collections", "how are payments coming in", "cash billing this month".
     Relates to the Payment Mode Summary report.
 
     Args:
-        range: "today", "this_week", "last_7_days", "last_30_days",
-            "this_month". Defaults to "this_month".
+        range: One of "today", "yesterday", "this_week", "last_7_days",
+            "last_30_days", "this_month", "last_month", "last_3_months",
+            "last_6_months", "this_year", "last_year", "all_time".
+            Defaults to "this_month".
     """
     return await _run(tool_context, "payment_mode_breakdown", {"range": range})
 
@@ -591,7 +672,8 @@ async def daily_order_activity(
     Relates to the Daily Order Activity report.
 
     Args:
-        range: "this_week", "last_7_days", "this_month", "last_30_days".
+        range: One of "today", "yesterday", "this_week", "last_7_days",
+            "last_30_days", "this_month", "last_month", "last_3_months".
             Defaults to "last_7_days".
     """
     return await _run(tool_context, "daily_order_activity", {"range": range})
@@ -652,8 +734,13 @@ async def technician_activity(
     each technician do", "technician performance", "who is doing the most work".
     Relates to the Technician Activity Log and Technician Jobs reports.
 
+    NOTE: this counts production JOBS ASSIGNED to staff. For cases ENTERED /
+    CREATED by a staff member, use staff_list instead.
+
     Args:
-        range: "this_month", "last_30_days", "this_week", "last_7_days".
+        range: One of "today", "yesterday", "this_week", "last_7_days",
+            "last_30_days", "this_month", "last_month", "last_3_months",
+            "last_6_months", "this_year", "last_year", "all_time".
             Defaults to "this_month".
     """
     return await _run(tool_context, "technician_activity", {"range": range})
@@ -904,18 +991,27 @@ async def warranty_create(
 
 
 async def staff_list(
-    tool_context: ToolContext, query: str = "", limit: int = 25
+    tool_context: ToolContext,
+    query: str = "",
+    limit: int = 25,
+    range: str = "all_time",
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    sort_by: str = "cases",
 ) -> Dict[str, Any]:
-    """List active staff members with their case creation counts.
+    """List active staff members with their case CREATION counts, ranked.
 
-    Use for: "who works here", "list my staff", "find Rahul",
-    "how many cases did Jameel create", "which staff creates the most cases",
-    "cases by staff member", "who can I assign this task to".
+    THE tool for "cases created by a user/staff member" — it counts cases
+    where that person is the creator (any role: technician, fielder, data
+    entry, admin). Use for: "how many cases did Jameel create", "how many
+    cases were created by this user", "who entered the most cases this
+    month", "which staff creates the most cases", "who works here",
+    "list my staff", "find Rahul", "who can I assign this task to".
 
-    The result includes a "Cases Created" column showing how many cases
-    each staff member has created. Use this when the user asks about
-    case volume per staff member or wants to know a specific person's
-    case count.
+    The "Cases Created" column is scoped to `range` (default all_time).
+    For "who entered more cases this month" pass range="this_month".
+    Do NOT use technician_activity for case-creation questions — that
+    counts production jobs ASSIGNED to staff, not cases they created.
 
     This is also the FIRST tool to call when the user wants to create a
     task and needs to pick an assignee — it returns names AND internal ids
@@ -924,8 +1020,78 @@ async def staff_list(
     Args:
         query: Optional name filter. Case-insensitive partial match.
         limit: Max results (1-100). Defaults to 25.
+        range: Period for the Cases Created count. One of "today",
+            "yesterday", "this_week", "last_7_days", "last_30_days",
+            "this_month", "last_month", "last_3_months", "last_6_months",
+            "this_year", "last_year", "all_time". Defaults to "all_time".
+        from_date: Optional explicit start (YYYY-MM-DD), with to_date.
+            Overrides range.
+        to_date: Optional explicit end (YYYY-MM-DD).
+        sort_by: "cases" (most cases created first, default) or "name".
     """
-    return await _run(tool_context, "staff_list", {"query": query, "limit": limit})
+    params = _range_params(range, from_date, to_date)
+    params.update({"query": query, "limit": limit, "sort_by": sort_by})
+    return await _run(tool_context, "staff_list", params)
+
+
+async def cases_due(
+    tool_context: ToolContext,
+    range: str = "tomorrow",
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    top_n: int = 30,
+) -> Dict[str, Any]:
+    """List OPEN cases due for delivery in a date window (actual case list,
+    with case ID, doctor, patient, status and due date).
+
+    Use for: "which cases go out tomorrow", "kal kaunsa case jayega",
+    "what cases are due today", "cases going in the next 5 / 10 days",
+    "what's due this week", "which cases should I prepare for dispatch".
+
+    For cases ALREADY delivered ("aaj kaunsa case deliver hua"), use
+    shipment_list with status=DELIVERED instead. For OVERDUE cases, use
+    delayed_cases.
+
+    Args:
+        range: "today", "tomorrow" (default), "this_week", "last_7_days",
+            or any named range.
+        from_date: Optional explicit start (YYYY-MM-DD), with to_date —
+            e.g. "next 5 days" → today through today+5. Overrides range.
+        to_date: Optional explicit end (YYYY-MM-DD).
+        top_n: Max cases to return (1-100). Defaults to 30.
+    """
+    params = _range_params(range, from_date, to_date)
+    params["top_n"] = top_n
+    return await _run(tool_context, "cases_due", params)
+
+
+async def repeat_cases(
+    tool_context: ToolContext,
+    group_by: str = "doctor",
+    range: str = "last_3_months",
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    top_n: int = 15,
+) -> Dict[str, Any]:
+    """Repeat/remake cases ranked by doctor (default) or by creating staff.
+
+    Use for: "which client has maximum repeats", "which doctor sends the
+    most remakes", "kausa doctor repeat karwata hai", "which staff has the
+    most repeat cases" (group_by="staff"), "repeat cases report".
+
+    For the overall repeat/rejection PERCENTAGE, use rejection_rate instead.
+
+    Args:
+        group_by: "doctor" (default) or "staff" (who entered the case).
+        range: Named range, defaults to "last_3_months".
+        from_date: Optional explicit start (YYYY-MM-DD), with to_date.
+            Overrides range.
+        to_date: Optional explicit end (YYYY-MM-DD).
+        top_n: Max rows (1-100). Defaults to 15.
+    """
+    params = _range_params(range, from_date, to_date)
+    params.update({"group_by": group_by, "top_n": top_n})
+    return await _run(tool_context, "repeat_cases", params)
 
 
 async def task_list(
@@ -1089,6 +1255,9 @@ LABY_TOOLS = [
     delayed_cases,
     outstanding_payments,
     patient_count,
+    # Phase 8 — RCA-driven gap fills (specs/laby-rca-improvements)
+    cases_due,
+    repeat_cases,
     # Phase 2 — analytics & comparisons
     revenue_summary,
     month_over_month,
