@@ -29,10 +29,10 @@ class Settings:
     log_level: str = _get("LOG_LEVEL", "INFO")
 
     # DeepSeek (OpenAI-compatible) via ADK's LiteLLM wrapper.
-    # IMPORTANT: use a model that supports FUNCTION CALLING. "deepseek-chat"
-    # (V3) does; "deepseek-reasoner" (R1) does NOT — and the whole agent is
+    # IMPORTANT: use a model that supports FUNCTION CALLING. "deepseek-v4-flash"
+    # does; "deepseek-reasoner" (R1) does NOT — and the whole agent is
     # built on tool calls, so do not switch to R1.
-    model: str = _get("LABY_MODEL", "deepseek/deepseek-chat")
+    model: str = _get("LABY_MODEL", "deepseek/deepseek-v4-flash")
     deepseek_api_key: str = _get("DEEPSEEK_API_KEY", "")
     # Override only if pointing at a proxy/self-hosted endpoint.
     deepseek_api_base: str = _get("DEEPSEEK_API_BASE", "")

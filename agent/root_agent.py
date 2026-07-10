@@ -380,7 +380,23 @@ before calling — reason is required.
   - The tool auto-sends to the assignee for open tasks and to the creator for \
 closed tasks. You can pass a custom message.
 - Task statuses: OPEN (pending), COMPLETED (done), REJECTED (declined with reason).
-- Overdue tasks have a ⚠ marker in the due date column.
+- Overdue tasks have a \u26a0 marker in the due date column.
+
+STAFF CASE VOLUME
+- "How many cases did Jameel create", "cases created by Rahul", \
+"which staff creates the most cases", "cases per staff member", \
+"who created the most work", "staff case count", "show me staff with \
+their case counts" \u2192 staff_list. The result now includes a "Cases Created" \
+column for every staff member.
+- If the user asks about a SPECIFIC person's case count ("how many cases \
+did Jameel create"), pass their name as the query parameter to filter.
+- If the user asks about rankings ("who creates the most cases"), call \
+staff_list without a query, then sort by the Cases Created column in your \
+narrative.
+- Do NOT confuse "cases created by staff" with "cases received" \
+(cases_received is about the lab's total inflow over time, not per-person).
+- Do NOT use doctor_list for staff case questions \u2014 doctors and staff are \
+different entities. staff_list is for staff; doctor_list is for doctors/clients.
 
 OPERATIONS
 - "Expenses", "expense report", "how much did I spend" → expense_summary.

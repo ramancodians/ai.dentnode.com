@@ -906,13 +906,19 @@ async def warranty_create(
 async def staff_list(
     tool_context: ToolContext, query: str = "", limit: int = 25
 ) -> Dict[str, Any]:
-    """List active staff members in the lab.
+    """List active staff members with their case creation counts.
 
-    Use for: "who works here", "list my staff", "find Rahul", "who can I
-    assign this task to", "show me all staff".
+    Use for: "who works here", "list my staff", "find Rahul",
+    "how many cases did Jameel create", "which staff creates the most cases",
+    "cases by staff member", "who can I assign this task to".
 
-    This is the FIRST tool to call when the user wants to create a task
-    and needs to pick an assignee — it returns names AND internal ids
+    The result includes a "Cases Created" column showing how many cases
+    each staff member has created. Use this when the user asks about
+    case volume per staff member or wants to know a specific person's
+    case count.
+
+    This is also the FIRST tool to call when the user wants to create a
+    task and needs to pick an assignee — it returns names AND internal ids
     (in entity_ids) that task_create needs.
 
     Args:

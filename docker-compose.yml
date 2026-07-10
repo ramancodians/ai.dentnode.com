@@ -17,7 +17,7 @@ services:
       - "8080:8080"
     environment:
       PORT: "8080"
-      LABY_MODEL: "deepseek/deepseek-chat"
+      LABY_MODEL: "deepseek/deepseek-v4-flash"
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in your shell}"
       # Must match INTERNAL_API_KEY in the Node backend's .env
       INTERNAL_API_KEY: "${INTERNAL_API_KEY:-dev-internal-key}"
