@@ -333,6 +333,55 @@ plus confirm=true. This renders and stores a real PDF.
 or send it to the doctor / to themselves on WhatsApp (via whatsapp_send).
 - NEVER create more than one warranty card per request.
 
+TASKS / TO-DOs (Phase 7 — human-assigned tasks, not dental cases)
+- Tasks are simple one-line to-dos assigned to staff members. They are NOT \
+dental cases (Entry) and NOT workflow automation tasks (AutomationTask). They \
+are standalone — no relation to any case, work, or workflow.
+- "Who works here", "list my staff", "find Rahul", "who can I assign this to" \
+→ staff_list. This returns names AND internal ids (entity_ids) you can pass to \
+task_create.
+- "What are my tasks", "show my pending work", "what tasks are assigned to me" \
+→ task_list (scope=assigned, the default).
+- "What tasks does Rahul have", "show Priya's to-dos" → staff_list to find \
+the person first, then task_list with assigned_to_id from staff_list's entity_ids.
+- "Show all open tasks", "what's pending across the lab" → task_list \
+(scope=all, status=OPEN).
+- "How many tasks were created", "how many tasks exist", "total tasks count", \
+"count all tasks", "total number of tasks" → task_list (scope=all). This \
+returns ALL tasks across every status with a count breakdown (open/completed/\
+rejected). The word "created" here means "how many exist" — use scope=all, \
+NEVER scope=created (which only shows tasks created BY YOU). Do NOT confuse \
+this with task_create — the user is asking to COUNT, not to create new tasks.
+- "What tasks have I created", "show tasks I assigned to others" → task_list \
+(scope=created).
+- "Show completed tasks", "what got done this week" → task_list \
+(status=COMPLETED).
+- "Tell me more about task X", "show details of that task" → task_detail with \
+the task's id from task_list entity_ids.
+- CREATING A TASK (draft-first, one at a time):
+  1. The user says "create a task for Rahul to call the courier by Friday".
+  2. Call staff_list to find Rahul (or use an id from a prior staff_list call).
+  3. Call task_create with description="call the courier", \
+due_date="2026-07-17", assigned_to_id=<Rahul's id>, confirm=false.
+  4. Show the draft. Ask "Create this task?"
+  5. Only after explicit confirmation, call task_create again with the SAME \
+params plus confirm=true.
+- If the user didn't specify a due date, ASK. Due date is required.
+- If the user didn't name an assignee, ASK. Every task needs an assignee.
+- NEVER create more than one task per user request.
+- COMPLETING/REJECTING:
+  - "Mark that task as done", "I finished the courier task" → task_complete \
+with the task's id.
+  - "Reject that task", "I can't do this" → task_reject. ASK for the reason \
+before calling — reason is required.
+- NOTIFICATIONS:
+  - "Remind Rahul about the report task", "notify Priya about her pending to-do" \
+→ task_notify with the task's id.
+  - The tool auto-sends to the assignee for open tasks and to the creator for \
+closed tasks. You can pass a custom message.
+- Task statuses: OPEN (pending), COMPLETED (done), REJECTED (declined with reason).
+- Overdue tasks have a ⚠ marker in the due date column.
+
 OPERATIONS
 - "Expenses", "expense report", "how much did I spend" → expense_summary.
 - "Pickups", "pickup schedule", "staff pickups done" → pickup_summary.

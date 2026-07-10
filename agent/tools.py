@@ -903,6 +903,165 @@ async def warranty_create(
     return await _run(tool_context, "warranty_create", params)
 
 
+async def staff_list(
+    tool_context: ToolContext, query: str = "", limit: int = 25
+) -> Dict[str, Any]:
+    """List active staff members in the lab.
+
+    Use for: "who works here", "list my staff", "find Rahul", "who can I
+    assign this task to", "show me all staff".
+
+    This is the FIRST tool to call when the user wants to create a task
+    and needs to pick an assignee — it returns names AND internal ids
+    (in entity_ids) that task_create needs.
+
+    Args:
+        query: Optional name filter. Case-insensitive partial match.
+        limit: Max results (1-100). Defaults to 25.
+    """
+    return await _run(tool_context, "staff_list", {"query": query, "limit": limit})
+
+
+async def task_list(
+    tool_context: ToolContext,
+    scope: str = "assigned",
+    status: Optional[str] = None,
+    assigned_to_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List tasks/to-dos in the lab with their status.
+
+    Use for: "what tasks are assigned to me", "show all open tasks",
+    "what tasks does Rahul have", "show my pending work", "tasks
+    created by me", "how many tasks are done".
+
+    Args:
+        scope: "assigned" (tasks assigned to current user, default),
+               "created" (tasks created by current user),
+               "all" (all tasks in the lab).
+        status: Optional filter — "OPEN", "COMPLETED", or "REJECTED".
+        assigned_to_id: Optional internal staff id from staff_list
+            entity_ids to see a specific person's tasks.
+    """
+    params: Dict[str, Any] = {"scope": scope}
+    if status:
+        params["status"] = status
+    if assigned_to_id:
+        params["assigned_to_id"] = assigned_to_id
+    return await _run(tool_context, "task_list", params)
+
+
+async def task_create(
+    tool_context: ToolContext,
+    description: str,
+    due_date: str,
+    assigned_to_id: str,
+    image_url: Optional[str] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Create ONE task/to-do and assign it to a staff member. DRAFT-FIRST.
+
+    confirm=false (the default) returns a PREVIEW of what will be created
+    — it creates NOTHING. Only call again with confirm=true AFTER showing
+    the draft and getting the user's explicit go-ahead.
+
+    NEVER create more than one task per call. NEVER call with confirm=true
+    without first showing the draft and getting user confirmation.
+
+    Use for: "create a task for Rahul to call the courier", "assign a
+    to-do to Priya", "remind someone to do X by Friday".
+
+    Args:
+        description: The one-line task instruction (required).
+        due_date: ISO date string like "2026-07-15" (required).
+        assigned_to_id: Internal staff id from staff_list entity_ids
+            (required — use staff_list first to find the person).
+        image_url: Optional S3 URL for an attached image.
+        confirm: False (default) previews the draft only. True actually
+            creates the task and notifies the assignee.
+    """
+    params: Dict[str, Any] = {
+        "description": description,
+        "due_date": due_date,
+        "assigned_to_id": assigned_to_id,
+        "confirm": confirm,
+    }
+    if image_url:
+        params["image_url"] = image_url
+    return await _run(tool_context, "task_create", params)
+
+
+async def task_detail(
+    tool_context: ToolContext, task_id: str
+) -> Dict[str, Any]:
+    """Get full detail of a single task by its ID.
+
+    Use after task_list when the user wants more info on a specific task
+    or asks "tell me more about that task".
+
+    Args:
+        task_id: The task's internal id from task_list entity_ids.
+    """
+    return await _run(tool_context, "task_detail", {"task_id": task_id})
+
+
+async def task_complete(
+    tool_context: ToolContext, task_id: str
+) -> Dict[str, Any]:
+    """Mark a task as COMPLETED.
+
+    Only the assignee or an admin can complete a task. If the caller
+    is neither, the tool returns an error.
+
+    Use for: "mark that task as done", "complete the courier task",
+    "I finished that to-do".
+
+    Args:
+        task_id: The task's internal id from task_list entity_ids.
+    """
+    return await _run(tool_context, "task_complete", {"task_id": task_id})
+
+
+async def task_reject(
+    tool_context: ToolContext, task_id: str, reason: str
+) -> Dict[str, Any]:
+    """Reject a task with a reason. Only the assignee or an admin can reject.
+
+    The reason is REQUIRED — ask the user why they want to reject if
+    they haven't said.
+
+    Use for: "reject that task", "I can't do this", "decline the to-do".
+
+    Args:
+        task_id: The task's internal id from task_list entity_ids.
+        reason: Why the task is being rejected (required).
+    """
+    return await _run(tool_context, "task_reject", {"task_id": task_id, "reason": reason})
+
+
+async def task_notify(
+    tool_context: ToolContext,
+    task_id: str,
+    message: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Send an in-app notification about a task.
+
+    Use to remind an assignee about a pending task, or notify the
+    task creator about a status change.
+
+    Use for: "remind Rahul about the report task", "notify Priya
+    about the pending courier task", "ping them about this".
+
+    Args:
+        task_id: The task's internal id from task_list entity_ids.
+        message: Optional custom notification message. Defaults to
+            a reminder about the due date or status.
+    """
+    params: Dict[str, Any] = {"task_id": task_id}
+    if message:
+        params["message"] = message
+    return await _run(tool_context, "task_notify", params)
+
+
 # Registered, in priority order, with the LlmAgent.
 LABY_TOOLS = [
     # Meta / navigation
@@ -952,4 +1111,12 @@ LABY_TOOLS = [
     # Phase 6 — Actions (draft-first, one action at a time)
     shipment_create,
     warranty_create,
+    # Phase 7 — Tasks (to-do / ticket system)
+    staff_list,
+    task_list,
+    task_create,
+    task_detail,
+    task_complete,
+    task_reject,
+    task_notify,
 ]
