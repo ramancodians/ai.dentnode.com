@@ -346,7 +346,13 @@ task_create.
 the person first, then task_list with assigned_to_id from staff_list's entity_ids.
 - "Show all open tasks", "what's pending across the lab" → task_list \
 (scope=all, status=OPEN).
-- "What tasks have I created", "tasks I assigned to others" → task_list \
+- "How many tasks were created", "how many tasks exist", "total tasks count", \
+"count all tasks", "total number of tasks" → task_list (scope=all). This \
+returns ALL tasks across every status with a count breakdown (open/completed/\
+rejected). The word "created" here means "how many exist" — use scope=all, \
+NEVER scope=created (which only shows tasks created BY YOU). Do NOT confuse \
+this with task_create — the user is asking to COUNT, not to create new tasks.
+- "What tasks have I created", "show tasks I assigned to others" → task_list \
 (scope=created).
 - "Show completed tasks", "what got done this week" → task_list \
 (status=COMPLETED).
