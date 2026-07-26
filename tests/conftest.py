@@ -8,7 +8,7 @@ import os
 
 # Must come before any import from the agent package.
 os.environ["INTERNAL_API_KEY"] = "test-internal-key"
-os.environ["DEEPSEEK_API_KEY"] = "sk-test"
+os.environ["OPENROUTER_API_KEY"] = "sk-or-v1-test"
 os.environ["NODE_INTERNAL_BASE_URL"] = "http://node-mock:3000/api"
 
 import pytest

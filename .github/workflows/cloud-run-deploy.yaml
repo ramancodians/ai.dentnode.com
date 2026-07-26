@@ -72,8 +72,8 @@ jobs:
             --image=${{ steps.image.outputs.tag }} \
             --ingress=all \
             --memory=512Mi \
-            --set-env-vars=LABY_MODEL=deepseek/deepseek-chat,NODE_INTERNAL_BASE_URL=https://app.dentnode.com/api \
-            --set-secrets=INTERNAL_API_KEY=LABY_INTERNAL_API_KEY:latest,DEEPSEEK_API_KEY=LABY_DEEPSEEK_API_KEY:latest \
+            --set-env-vars=LABY_MODEL=deepseek/deepseek-v4-flash,LABY_VISION_MODEL=google/gemini-2.5-flash,NODE_INTERNAL_BASE_URL=https://app.dentnode.com/api,OPENROUTER_API_BASE=https://openrouter.ai/api/v1 \
+            --set-secrets=INTERNAL_API_KEY=LABY_INTERNAL_API_KEY:latest,OPENROUTER_API_KEY=LABY_OPENROUTER_API_KEY:latest \
             $NO_TRAFFIC_FLAG --quiet
 
       - id: revision

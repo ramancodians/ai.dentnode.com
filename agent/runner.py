@@ -19,6 +19,7 @@ Event vocabulary emitted (each is a dict):
 
 import asyncio
 import logging
+import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from google.adk.runners import Runner
@@ -27,6 +28,7 @@ from google.genai import types as genai_types
 
 from .config import settings
 from .root_agent import root_agent
+from .usage import report_usage
 
 logger = logging.getLogger(__name__)
 APP_NAME = "laby"
@@ -128,6 +130,16 @@ async def run_turn(
     logger.info("Agent turn started", extra={"lab_id": lab_id, "user_id": user_id})
     yield {"type": "status", "step": "thinking"}
 
+    # Accumulate token usage across the turn (a turn may span several LLM calls
+    # when tools are invoked). Reported out-of-band after a successful `done`;
+    # this never changes the streamed event vocabulary Node consumes.
+    t0 = time.monotonic()
+    usage_totals = {
+        "prompt_token_count": 0,
+        "candidates_token_count": 0,
+        "total_token_count": 0,
+    }
+
     try:
         async with asyncio.timeout(settings.turn_timeout_secs):
             async for event in _runner.run_async(
@@ -135,6 +147,7 @@ async def run_turn(
                 session_id=session.id,
                 new_message=new_message,
             ):
+                _accumulate_usage(usage_totals, event)
                 # Surface function calls / responses as they happen.
                 for part in _parts(event):
                     fc = getattr(part, "function_call", None)
@@ -177,6 +190,21 @@ async def run_turn(
         logger.info("Agent turn completed", extra={"lab_id": lab_id})
         yield {"type": "done"}
 
+        # Meter the turn AFTER the response is fully delivered. report_usage is
+        # non-fatal and never raises, so it can neither break nor alter the chat.
+        # OpenRouter's exact cost isn't exposed through ADK, so cost is a
+        # best-effort estimate (cost_source="estimated").
+        await report_usage(
+            feature="laby_chat",
+            lab_id=lab_id,
+            user_id=user_id,
+            model=settings.model,
+            usage=usage_totals,
+            latency_ms=int((time.monotonic() - t0) * 1000),
+            status="ok",
+            cost_source="estimated",
+        )
+
     except asyncio.TimeoutError:
         logger.error(
             "Agent turn timed out",
@@ -200,6 +228,22 @@ async def run_turn(
             "code": "AGENT_FAILED",
             "message": "Laby could not complete that request. Please try again.",
         }
+
+
+def _accumulate_usage(totals: Dict[str, int], event: Any) -> None:
+    """Add an ADK event's usage_metadata token counts into the running totals.
+
+    Best-effort and defensive: events without usage_metadata (tool calls, status
+    events) are ignored, and any missing/non-int field is treated as zero. Never
+    raises — metering must not affect the turn.
+    """
+    um = getattr(event, "usage_metadata", None)
+    if um is None:
+        return
+    for key in totals:
+        value = getattr(um, key, None)
+        if isinstance(value, int):
+            totals[key] += value
 
 
 def _parts(event: Any) -> list:

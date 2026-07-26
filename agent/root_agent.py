@@ -6,6 +6,7 @@ from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
 
 from .config import settings
+from .tool_schema import slim_tools
 from .tools import LABY_TOOLS
 
 SYSTEM_INSTRUCTION = """\
@@ -490,29 +491,40 @@ You serve one lab at a time; never reference or compare against other labs.
 
 
 def _build_model() -> LiteLlm:
-    """DeepSeek (OpenAI-compatible) via ADK's LiteLLM wrapper.
+    """OpenRouter via ADK's LiteLLM wrapper — the only LLM path we use.
 
-    litellm reads DEEPSEEK_API_KEY from the environment; we set it from config
-    so the same value works whether it arrives via .env or Secret Manager.
+    We never call a provider API directly. Under OpenRouter's BYOK setup the
+    provider credentials sit in the OpenRouter dashboard, so this service ships
+    a single OPENROUTER_API_KEY and lets OpenRouter route the request.
+
+    Key and base are passed explicitly; OR_SITE_URL / OR_APP_NAME are set in the
+    environment because litellm reads those to build OpenRouter's attribution
+    headers (HTTP-Referer / X-Title).
     """
-    if settings.deepseek_api_key:
-        os.environ.setdefault("DEEPSEEK_API_KEY", settings.deepseek_api_key)
+    if settings.openrouter_api_key:
+        os.environ.setdefault("OPENROUTER_API_KEY", settings.openrouter_api_key)
+    if settings.openrouter_site_url:
+        os.environ.setdefault("OR_SITE_URL", settings.openrouter_site_url)
+    if settings.openrouter_app_name:
+        os.environ.setdefault("OR_APP_NAME", settings.openrouter_app_name)
 
-    kwargs: dict = {}
-    if settings.deepseek_api_base:
-        kwargs["api_base"] = settings.deepseek_api_base
-
-    return LiteLlm(model=settings.model, **kwargs)
+    return LiteLlm(
+        model=settings.model,
+        api_key=settings.openrouter_api_key or None,
+        api_base=settings.openrouter_api_base,
+    )
 
 
 def build_root_agent() -> LlmAgent:
-    """Construct the Laby LlmAgent backed by DeepSeek."""
+    """Construct the Laby LlmAgent backed by OpenRouter."""
     return LlmAgent(
         name="laby",
         model=_build_model(),
         description="DentNode's dental-lab operations co-pilot.",
         instruction=SYSTEM_INSTRUCTION,
-        tools=LABY_TOOLS,
+        # Same 48 tools, same documentation — declared in ~15% fewer tokens.
+        # The tool prefix is re-sent on every call, so this is pure cost saving.
+        tools=slim_tools(LABY_TOOLS),
     )
 
 

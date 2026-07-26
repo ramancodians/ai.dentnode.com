@@ -21,6 +21,17 @@ def _int(name: str, default: int) -> int:
         raise RuntimeError(f"Environment variable {name} must be an integer, got: {raw!r}")
 
 
+def _openrouter_model(raw: str) -> str:
+    """Normalise LABY_MODEL to the litellm `openrouter/...` route.
+
+    Every model goes through OpenRouter, so a bare slug like
+    "deepseek/deepseek-v4-flash" (the OpenRouter model id) is prefixed for us.
+    This keeps already-deployed env vars working after the cutover.
+    """
+    slug = raw.strip()
+    return slug if slug.startswith("openrouter/") else f"openrouter/{slug}"
+
+
 class Settings:
     # FastAPI / Cloud Run
     port: int = _int("PORT", 8080)
@@ -28,14 +39,33 @@ class Settings:
     # Logging (INFO by default; set DEBUG locally if needed)
     log_level: str = _get("LOG_LEVEL", "INFO")
 
-    # DeepSeek (OpenAI-compatible) via ADK's LiteLLM wrapper.
+    # OpenRouter is the ONLY LLM gateway. We never call a provider's API
+    # directly — provider credentials live in the OpenRouter dashboard under
+    # BYOK, so this service holds exactly one key (OPENROUTER_API_KEY).
+    #
+    # LABY_MODEL takes an OpenRouter model id ("deepseek/deepseek-v4-flash");
+    # the "openrouter/" litellm route prefix is added automatically.
     # IMPORTANT: use a model that supports FUNCTION CALLING. "deepseek-v4-flash"
     # does; "deepseek-reasoner" (R1) does NOT — and the whole agent is
     # built on tool calls, so do not switch to R1.
-    model: str = _get("LABY_MODEL", "deepseek/deepseek-v4-flash")
-    deepseek_api_key: str = _get("DEEPSEEK_API_KEY", "")
-    # Override only if pointing at a proxy/self-hosted endpoint.
-    deepseek_api_base: str = _get("DEEPSEEK_API_BASE", "")
+    model: str = _openrouter_model(_get("LABY_MODEL", "deepseek/deepseek-v4-flash"))
+
+    # Separate model for VISION features (case-from-image, scan review). The
+    # default text model is chosen for function calling and cannot see images.
+    # Default matches what Node called directly before the migration
+    # (gemini-2.5-flash), so extraction quality is unchanged — but routed via
+    # OpenRouter, which also removes the Gemini free-tier 20-req/day cap that
+    # was causing 500s on the direct path.
+    vision_model: str = _openrouter_model(
+        _get("LABY_VISION_MODEL", "google/gemini-2.5-flash")
+    )
+
+    openrouter_api_key: str = _get("OPENROUTER_API_KEY", "")
+    # Override only if pointing at an OpenRouter-compatible proxy.
+    openrouter_api_base: str = _get("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
+    # Attribution shown on OpenRouter's activity dashboard / leaderboards.
+    openrouter_site_url: str = _get("OPENROUTER_SITE_URL", "https://ai.dentnode.com")
+    openrouter_app_name: str = _get("OPENROUTER_APP_NAME", "DentNode Laby")
 
     # Service-to-service auth. Same secret on both ends:
     #  - Node calls THIS service with x-internal-key.
@@ -59,8 +89,8 @@ class Settings:
             missing.append("INTERNAL_API_KEY")
         if not self.node_base_url:
             missing.append("NODE_INTERNAL_BASE_URL")
-        if not self.deepseek_api_key:
-            missing.append("DEEPSEEK_API_KEY")
+        if not self.openrouter_api_key:
+            missing.append("OPENROUTER_API_KEY")
         if missing:
             raise RuntimeError(
                 f"Missing required environment variables: {', '.join(missing)}"
@@ -76,11 +106,10 @@ class Settings:
             raise RuntimeError(
                 f"LABY_TURN_TIMEOUT must be ≥ 10 seconds, got {self.turn_timeout_secs}"
             )
-        if self.deepseek_api_base and not self.deepseek_api_base.startswith(
-            ("http://", "https://")
-        ):
+        if not self.openrouter_api_base.startswith(("http://", "https://")):
             raise RuntimeError(
-                f"DEEPSEEK_API_BASE must be a valid http(s) URL, got: {self.deepseek_api_base!r}"
+                "OPENROUTER_API_BASE must be a valid http(s) URL, got: "
+                f"{self.openrouter_api_base!r}"
             )
 
 

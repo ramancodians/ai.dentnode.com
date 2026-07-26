@@ -15,7 +15,12 @@
 | Secret Manager name | Injected env var |
 |---------------------|-----------------|
 | `LABY_INTERNAL_API_KEY` | `INTERNAL_API_KEY` |
-| `LABY_DEEPSEEK_API_KEY` | `DEEPSEEK_API_KEY` |
+| `LABY_OPENROUTER_API_KEY` | `OPENROUTER_API_KEY` |
+
+All LLM traffic goes through **OpenRouter** (BYOK — provider credentials are
+configured in the OpenRouter dashboard, not here). There is no provider API key
+in this service. The old `LABY_DEEPSEEK_API_KEY` secret is unused as of the
+OpenRouter cutover and can be destroyed once the new revision is at 100%.
 
 To rotate a secret:
 ```bash
@@ -59,7 +64,7 @@ URL=$(gcloud run services describe laby-agent \
 
 # The service is internal-only; call from a VM or Cloud Shell inside the VPC
 curl -sf "${URL}/health" | jq .
-# Expected: {"status":"healthy","service":"laby-adk","model":"deepseek/deepseek-chat","provider":"deepseek"}
+# Expected: {"status":"healthy","service":"laby-adk","model":"openrouter/deepseek/deepseek-v4-flash","provider":"openrouter"}
 ```
 
 ## Smoke test (from inside the VPC)
@@ -96,12 +101,13 @@ gcloud logging read \
 Check that both secrets are present and the latest version is accessible:
 ```bash
 gcloud secrets versions list LABY_INTERNAL_API_KEY --project=app-dentnode-com
-gcloud secrets versions list LABY_DEEPSEEK_API_KEY --project=app-dentnode-com
+gcloud secrets versions list LABY_OPENROUTER_API_KEY --project=app-dentnode-com
 ```
 
 ### Agent turns time out (`TURN_TIMEOUT` error)
 
-DeepSeek API may be slow or rate-limiting. Check DeepSeek status. To increase
+OpenRouter (or the upstream provider it routed to) may be slow or rate-limiting.
+Check https://status.openrouter.ai and the OpenRouter activity dashboard. To increase
 the timeout (default 120 s), update the Cloud Run env var:
 ```bash
 gcloud run services update laby-agent \
@@ -155,7 +161,9 @@ pytest tests/ -v
 - [ ] Create GCP project `app-dentnode-com` (or reuse existing)
 - [ ] Enable Cloud Run API, Artifact Registry API, Secret Manager API
 - [ ] Create Artifact Registry repo `dn-dashboard` in `asia-south2`
-- [ ] Create secrets `LABY_INTERNAL_API_KEY` and `LABY_DEEPSEEK_API_KEY`
+- [ ] Create secrets `LABY_INTERNAL_API_KEY` and `LABY_OPENROUTER_API_KEY`
+- [ ] Add the provider key(s) as BYOK integrations in the OpenRouter dashboard
+      (Settings → Integrations), so OpenRouter bills/routes them for us
 - [ ] Create a service account with roles: Cloud Run Admin, Artifact Registry Writer, Secret Manager Secret Accessor
 - [ ] Add service account JSON as GitHub secret `GCP_SERVICE_ACCOUNT`
 - [ ] Push to `main` to trigger first deploy

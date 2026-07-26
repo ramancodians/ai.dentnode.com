@@ -7,5 +7,6 @@ def test_health_body(client):
     data = client.get("/health").json()
     assert data["status"] == "healthy"
     assert data["service"] == "laby-adk"
-    assert data["provider"] == "deepseek"
-    assert "model" in data
+    assert data["provider"] == "openrouter"
+    # Every model is routed through OpenRouter, never a provider API directly.
+    assert data["model"].startswith("openrouter/")
