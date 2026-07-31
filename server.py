@@ -32,6 +32,7 @@ from agent.rejected_cases import (
 )
 from agent.rx_review import generate_rx_review
 from agent.runner import run_turn
+from agent.browser_runner import run_browser_turn
 from agent.scan_review import generate_scan_review
 from agent.usage import report_usage
 
@@ -168,6 +169,20 @@ async def health() -> Dict[str, Any]:
         "provider": "openrouter",
     }
 
+
+@app.post("/browser/run")
+async def browser_run(
+    body: RunRequest,
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_internal_id: Optional[str] = Header(default=None, alias="x-internal-id"),
+) -> StreamingResponse:
+    """Isolated DNLink browser-controller endpoint; it never loads Laby."""
+    _require_internal_key(x_internal_key or x_internal_id)
+    history = [t.model_dump() for t in (body.history or [])]
+    async def event_stream():
+        async for event in run_browser_turn(lab_id=body.lab_id, user_id=body.user_id, question=body.question, history=history):
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache, no-transform"})
 
 @app.post("/agent/run")
 async def agent_run(
