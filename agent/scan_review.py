@@ -197,7 +197,7 @@ async def generate_scan_review(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": content},
         ],
-        model=settings.vision_model,
+        model=settings.scan_review_vision_model,
         temperature=0.2,
         max_tokens=2048,
         timeout_secs=_SCAN_TIMEOUT_SECS,

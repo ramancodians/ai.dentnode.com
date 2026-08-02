@@ -14,6 +14,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # App code.
 COPY server.py .
 COPY agent ./agent
+COPY scan_review ./scan_review
+# server.py imports scan_qa unconditionally — omitting this kills the container
+# on startup with ModuleNotFoundError, before any health check can run.
+COPY scan_qa ./scan_qa
 
 # Run as non-root.
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin laby \

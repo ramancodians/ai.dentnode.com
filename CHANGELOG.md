@@ -6,6 +6,33 @@ Newest first. Each entry records what changed, plus anything that must be true i
 the environment for it to run — this service is deployed to Cloud Run by CI, so
 missing env vars and Secret Manager entries are the usual cause of a failed rollout.
 
+## [Unreleased] — Scan QA ships (Dockerfile fix)
+
+**Fixed**
+
+- `Dockerfile` never copied `scan_qa`, but `server.py` imports it
+  unconditionally at module scope. Any image built from this tree died on
+  startup with `ModuleNotFoundError: No module named 'scan_qa'` — before the
+  health check could run, so CI's readiness poll would have failed the rollout
+  and the canary would have rolled back. Added `COPY scan_qa ./scan_qa`.
+
+**Verified before deploy** (local build of this exact Dockerfile):
+
+- `pytest tests/` — 242 passed.
+- Container boots clean, no errors or warnings in startup logs.
+- `GET /health` → 200, `GET /scan-qa/health` → 200, `GET /scan-review/health` → 200.
+
+**Known limitation — segmentation is inactive in production.**
+`/scan-qa/health` reports `"weights_present":{"Max":false,"Man":false}`. The
+image ships neither `torch` (absent from `requirements.txt`) nor
+`vendor/meshsegnet/*.zip` (not copied by the Dockerfile), so
+`MeshSegNetSegmenter` cannot load and every request degrades to geometry-only
+regardless of the `segment` flag. Mesh-level findings — holes, islands, spikes,
+winding — are unaffected; per-tooth findings will not appear. Turning
+segmentation on is not just a `COPY`: it needs torch (~800 MB installed) plus
+the 57 MB weights, and the service currently runs on `--memory=512Mi`, so it
+would need a memory bump and a much larger image.
+
 ## [Unreleased] — Cloud Run env is now the full config surface
 
 **Changed**

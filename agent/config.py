@@ -50,7 +50,7 @@ class Settings:
     # built on tool calls, so do not switch to R1.
     model: str = _openrouter_model(_get("LABY_MODEL", "deepseek/deepseek-v4-flash"))
 
-    # Separate model for VISION features (case-from-image, scan review). The
+    # Separate model for VISION features (case-from-image, rejected-cases). The
     # default text model is chosen for function calling and cannot see images.
     # Default matches what Node called directly before the migration
     # (gemini-2.5-flash), so extraction quality is unchanged — but routed via
@@ -58,6 +58,16 @@ class Settings:
     # was causing 500s on the direct path.
     vision_model: str = _openrouter_model(
         _get("LABY_VISION_MODEL", "google/gemini-2.5-flash")
+    )
+
+    # Vision model for the SCAN REVIEW specifically. Deliberately its own knob:
+    # scan review is evaluated and tuned against dental arch renders, and its
+    # model should be swappable without touching case-from-image or
+    # rejected-cases, which share `vision_model` and are tuned for a different
+    # job. Falls back to LABY_VISION_MODEL so an unset deploy keeps working.
+    scan_review_vision_model: str = _openrouter_model(
+        _get("SCAN_REVIEW_VISION_MODEL", "")
+        or _get("LABY_VISION_MODEL", "google/gemini-2.5-flash")
     )
 
     openrouter_api_key: str = _get("OPENROUTER_API_KEY", "")
