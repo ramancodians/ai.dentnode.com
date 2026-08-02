@@ -459,7 +459,16 @@ def inspect_mesh(
                     }
                 )
     except Exception:  # noqa: BLE001
-        pass
+        # Do NOT stay silent here. Swallowing this is what let a missing graph
+        # engine ship: the analysis kept reporting shells=1 / fragments=[], so a
+        # scan with floating debris came back clean. Degrading is still the right
+        # call — one unmeasurable property must not fail the whole report — but it
+        # has to be visible in the logs.
+        logger.warning(
+            "Shell/fragment detection unavailable; reporting shells=1 and no "
+            "fragments. Disconnected pieces will NOT be detected.",
+            exc_info=True,
+        )
 
     try:
         report.surface_area_mm2 = float(mesh.area)

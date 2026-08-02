@@ -6,6 +6,30 @@ Newest first. Each entry records what changed, plus anything that must be true i
 the environment for it to run — this service is deployed to Cloud Run by CI, so
 missing env vars and Secret Manager entries are the usual cause of a failed rollout.
 
+## [Unreleased] — Scan Review never detected disconnected shells
+
+**Fixed**
+
+- `networkx` added to `requirements.txt`. It is **required, not optional**:
+  `trimesh.graph.connected_components` needs a graph engine (scipy or networkx)
+  and raises `ImportError("no graph engines available!")` without one. The image
+  installed neither.
+- The call in `scan_review/geometry.py` sat inside a bare `except Exception:
+  pass`, so that ImportError was swallowed whole. `shells` stayed at its default
+  `1` and `fragments` stayed `[]` — meaning **disconnected shells and scan
+  islands were never detected**, and a scan with floating debris came back
+  clean. A false negative in a QA product. The handler still degrades rather
+  than failing the report, but now logs a warning with a traceback.
+- `trimesh` pinned to `<6.0.0`. The bare `>=4.4.0` resolved to **5.0.0** in CI
+  and in the image while development ran on 4.11.2, so a major version was
+  reaching production untested.
+
+Caught by CI, not locally: this machine has scipy and networkx installed
+globally, so `connected_components` worked here and the suite passed 242/242.
+The clean CI environment is what exposed it. Verified afterwards by running the
+suite *inside the built image* (trimesh 5.0.0, networkx 3.6.1, numpy 2.5.1) —
+242 passed, including `test_floating_fragment_is_detected`.
+
 ## [Unreleased] — Scan QA ships (Dockerfile fix)
 
 **Fixed**
