@@ -29,6 +29,54 @@ echo -n "new-value" | gcloud secrets versions add LABY_INTERNAL_API_KEY \
 # Then redeploy via GitHub Actions (push to main or workflow_dispatch).
 ```
 
+## Environment variables
+
+**The workflow is the source of truth, not the live service.** The deploy step
+uses `--set-env-vars`, which *replaces* the entire literal-env list on every
+revision — a variable that is not in
+`.github/workflows/cloud-run-deploy.yaml` gets deleted from the next revision,
+even if someone set it by hand yesterday. Every knob read by
+`agent/config.py` and `scan_review/config.py` is listed there.
+
+`PORT` is the one exception: Cloud Run injects it and rejects it as an input, so
+it must never appear in the list.
+
+### Changing an env var
+
+Edit the `ENV_VARS` block in the workflow and push to `main`. That is the only
+change that survives.
+
+If you need it live *right now*, apply it by hand — but re-state the full list,
+and remember the promote step:
+
+```bash
+gcloud run services update laby-agent \
+  --region=asia-south2 --project=app-dentnode-com \
+  --update-env-vars=LABY_TURN_TIMEOUT=180   # --update- merges; --set- would wipe the rest
+
+# Traffic is PINNED to a named revision (see below), so the revision you just
+# created is serving 0% until you promote it.
+REV=$(gcloud run revisions list --service=laby-agent --region=asia-south2 \
+  --project=app-dentnode-com --sort-by="~DEPLOYED" --limit=1 --format="value(name)")
+gcloud run services update-traffic laby-agent \
+  --region=asia-south2 --project=app-dentnode-com --to-revisions=$REV=100
+```
+
+Then put the same change in the workflow, or the next deploy reverts it.
+
+### Traffic is pinned, not "latest"
+
+The workflow promotes with `update-traffic --to-revisions=<name>=100`, which
+turns off latest-revision serving for good. Consequence: **creating a revision
+is not deploying it.** `gcloud run services describe` shows the *desired*
+template, so the env list there can look correct while the revision actually
+serving traffic has none of it. Always check what is serving:
+
+```bash
+gcloud run services describe laby-agent --region=asia-south2 \
+  --project=app-dentnode-com --format="value(status.traffic)"
+```
+
 ## Normal deployment
 
 Push to `main` — the GitHub Actions workflow (`cloud-run-deploy.yaml`) handles
@@ -108,12 +156,8 @@ gcloud secrets versions list LABY_OPENROUTER_API_KEY --project=app-dentnode-com
 
 OpenRouter (or the upstream provider it routed to) may be slow or rate-limiting.
 Check https://status.openrouter.ai and the OpenRouter activity dashboard. To increase
-the timeout (default 120 s), update the Cloud Run env var:
-```bash
-gcloud run services update laby-agent \
-  --region=asia-south2 --project=app-dentnode-com \
-  --set-env-vars=LABY_TURN_TIMEOUT=180
-```
+the timeout (default 120 s), change `LABY_TURN_TIMEOUT` in
+`.github/workflows/cloud-run-deploy.yaml` and push — see "Changing an env var" below.
 
 ### Tool calls fail (`tool_error` in notes)
 

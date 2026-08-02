@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from agent.case_from_image import CaseExtractionError, extract_case_from_image
 from agent.config import settings
 from agent.insights import generate_insights
+from agent.image_to_entry import ImageToEntryResult, image_to_entry
 from agent.logging_setup import setup_logging
 from agent.marketing_copy import generate_product_update_email
 from agent.openrouter import OpenRouterError
@@ -36,6 +37,16 @@ from agent.browser_runner import run_browser_turn
 from agent.scan_review import generate_scan_review
 from agent.usage import report_usage
 
+# Standalone module — not part of Laby. Owns the /scan-review/* sub-namespace
+# (mesh QA from raw STL URLs); the flat POST /scan-review below is Laby's
+# separate vision review over rendered arch images.
+from scan_review import scan_review_router
+from scan_review.config import settings as scan_review_settings
+
+# Segmentation-conditioned scan QA. Owns /scan-qa/*; findings carry mesh
+# coordinates so the DN3D viewer can pin them to the model.
+from scan_qa import scan_qa_router
+
 # Wire JSON logging before the first log line is emitted.
 setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
@@ -44,11 +55,22 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     settings.validate()
+    scan_review_settings.validate()
     logger.info("Laby agent started", extra={"model": settings.model, "port": settings.port})
+    if scan_review_settings.allow_insecure_fetch:
+        # This disables the public-IP requirement on outbound mesh fetches. It
+        # is a local-dev switch; seeing it in a deployed log is an incident.
+        logger.warning(
+            "Scan Review insecure fetch is ENABLED — private/loopback mesh URLs "
+            "are reachable. Never use this outside local development."
+        )
     yield
 
 
 app = FastAPI(title="Laby ADK Agent", version="1.0.0", lifespan=lifespan)
+
+app.include_router(scan_review_router)
+app.include_router(scan_qa_router)
 
 
 class HistoryTurn(BaseModel):
@@ -127,6 +149,15 @@ class ScanReviewRequest(BaseModel):
 class CaseFromImageRequest(BaseModel):
     # Node fetches the image (allowlist/SSRF-checked) and sends the bytes; this
     # service never dereferences a URL.
+    lab_id: str = Field(..., min_length=1)
+    image_base64: str = Field(..., min_length=1)
+    mime_type: Optional[str] = None
+    user_id: Optional[str] = None
+
+
+class ImageToEntryRequest(BaseModel):
+    """Image-only extraction; lab/user fields exist solely for auth metering."""
+
     lab_id: str = Field(..., min_length=1)
     image_base64: str = Field(..., min_length=1)
     mime_type: Optional[str] = None
@@ -353,7 +384,7 @@ async def scan_review(
                 feature="scan_review",
                 lab_id=body.lab_id,
                 user_id=body.user_id,
-                model=settings.vision_model,
+                model=settings.scan_review_vision_model,
                 status="error",
             )
         )
@@ -447,6 +478,67 @@ async def case_from_image(
     )
 
     return {"success": True, "extracted": result.extracted, "model": result.model}
+
+
+@app.post("/image-to-entry")
+async def image_to_entry_endpoint(
+    body: ImageToEntryRequest,
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_internal_id: Optional[str] = Header(default=None, alias="x-internal-id"),
+) -> Dict[str, Any]:
+    """Return a DentNode entry-create draft; never persist or create an entry."""
+    _require_internal_key(x_internal_key or x_internal_id)
+
+    def _meter_error() -> None:
+        _fire_and_forget(
+            report_usage(
+                feature="image_to_entry",
+                lab_id=body.lab_id,
+                user_id=body.user_id,
+                model=settings.vision_model,
+                status="error",
+            )
+        )
+
+    try:
+        result: ImageToEntryResult = await image_to_entry(
+            image_base64=body.image_base64,
+            mime_type=body.mime_type or "image/jpeg",
+        )
+    except CaseExtractionError as exc:
+        logger.error(
+            "Image-to-entry returned unparseable output",
+            extra={"lab_id": body.lab_id, "error": str(exc)},
+        )
+        _meter_error()
+        raise HTTPException(status_code=502, detail=str(exc))
+    except OpenRouterError as exc:
+        logger.error(
+            "Image-to-entry model call failed",
+            extra={"lab_id": body.lab_id, "error": str(exc)},
+        )
+        _meter_error()
+        raise HTTPException(status_code=502, detail="Image-to-entry model call failed")
+
+    _fire_and_forget(
+        report_usage(
+            feature="image_to_entry",
+            lab_id=body.lab_id,
+            user_id=body.user_id,
+            model=result.model,
+            usage=result.usage,
+            cost=result.cost_usd,
+            cost_source="openrouter" if result.cost_usd is not None else "estimated",
+            latency_ms=result.latency_ms,
+            status="ok",
+            meta={
+                "work_items": len(result.payload["entry_payload"]["work"]),
+                "ready_to_create": result.payload["ready_to_create"],
+            },
+        )
+    )
+
+    return {"success": True, **result.payload, "model": result.model}
 
 
 @app.post("/rejected-cases-report")

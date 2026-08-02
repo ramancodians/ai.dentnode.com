@@ -67,12 +67,44 @@ jobs:
           NO_TRAFFIC_FLAG=""
           [ -n "$SERVICE_EXISTS" ] && NO_TRAFFIC_FLAG="--no-traffic --tag=candidate"
 
+          # This is the FULL desired env for the service: --set-env-vars replaces
+          # the whole literal-env list, so anything omitted here is deleted from
+          # the next revision. Every variable read by agent/config.py and
+          # scan_review/config.py belongs in this list, even where the code has a
+          # matching default — deploys should not depend on code defaults.
+          # PORT is deliberately absent: Cloud Run injects it and rejects it here.
+          # ^@^ is gcloud's custom-delimiter form, needed because OPENROUTER_APP_NAME
+          # contains a space.
+          ENV_VARS="^@^"
+          ENV_VARS="${ENV_VARS}LABY_MODEL=deepseek/deepseek-v4-flash"
+          ENV_VARS="${ENV_VARS}@LABY_VISION_MODEL=google/gemini-2.5-flash"
+          ENV_VARS="${ENV_VARS}@LABY_TURN_TIMEOUT=120"
+          ENV_VARS="${ENV_VARS}@LABY_HISTORY_TURNS=12"
+          ENV_VARS="${ENV_VARS}@LOG_LEVEL=INFO"
+          ENV_VARS="${ENV_VARS}@NODE_INTERNAL_BASE_URL=https://app.dentnode.com/api"
+          ENV_VARS="${ENV_VARS}@OPENROUTER_API_BASE=https://openrouter.ai/api/v1"
+          ENV_VARS="${ENV_VARS}@OPENROUTER_SITE_URL=https://ai.dentnode.com"
+          ENV_VARS="${ENV_VARS}@OPENROUTER_APP_NAME=DentNode Laby"
+          # Scan Review (standalone mesh QA module).
+          ENV_VARS="${ENV_VARS}@SCAN_REVIEW_VISION_MODEL=qwen/qwen3-vl-32b-instruct"
+          ENV_VARS="${ENV_VARS}@SCAN_REVIEW_MODEL=qwen/qwen3-vl-32b-instruct"
+          ENV_VARS="${ENV_VARS}@SCAN_REVIEW_ENABLE_LLM=true"
+          ENV_VARS="${ENV_VARS}@SCAN_REVIEW_LLM_TIMEOUT=90"
+          ENV_VARS="${ENV_VARS}@SCAN_REVIEW_MAX_BYTES=83886080"
+          ENV_VARS="${ENV_VARS}@SCAN_REVIEW_MAX_FILES=8"
+          ENV_VARS="${ENV_VARS}@SCAN_REVIEW_FETCH_TIMEOUT=60"
+          ENV_VARS="${ENV_VARS}@SCAN_REVIEW_ANALYZE_TIMEOUT=120"
+          ENV_VARS="${ENV_VARS}@SCAN_REVIEW_MAX_FACES=5000000"
+          # SSRF control: the module may only dereference URLs on these hosts.
+          ENV_VARS="${ENV_VARS}@SCAN_REVIEW_ALLOWED_HOSTS=storage.googleapis.com"
+          ENV_VARS="${ENV_VARS}@SCAN_REVIEW_ALLOW_INSECURE_FETCH=false"
+
           gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
             --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
             --image=${{ steps.image.outputs.tag }} \
             --ingress=all \
             --memory=512Mi \
-            --set-env-vars=LABY_MODEL=deepseek/deepseek-v4-flash,LABY_VISION_MODEL=google/gemini-2.5-flash,NODE_INTERNAL_BASE_URL=https://app.dentnode.com/api,OPENROUTER_API_BASE=https://openrouter.ai/api/v1 \
+            --set-env-vars="$ENV_VARS" \
             --set-secrets=INTERNAL_API_KEY=LABY_INTERNAL_API_KEY:latest,OPENROUTER_API_KEY=LABY_OPENROUTER_API_KEY:latest \
             $NO_TRAFFIC_FLAG --quiet
 
