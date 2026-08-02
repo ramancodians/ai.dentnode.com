@@ -8,8 +8,21 @@ httpx>=0.27.0
 pydantic>=2.7.0
 python-dotenv>=1.0.0
 
-# Scan Review (standalone mesh QA module). trimesh's core loaders + topology
-# need only numpy — the optional scipy/rtree/embree extras are deliberately NOT
-# installed, so the image stays small and the analysis stays pure-Python.
-trimesh>=4.4.0
+# Scan Review (standalone mesh QA module). trimesh's loaders + topology need
+# only numpy; the heavy rtree/embree extras are deliberately NOT installed, so
+# the image stays small and the analysis stays pure-Python.
+#
+# Upper bound is not cosmetic: `trimesh>=4.4.0` alone resolved to 5.0.0 in CI
+# and in the image while development happened on 4.11.2, so a major version
+# landed in production untested. Raise it deliberately, not by accident.
+trimesh>=4.4.0,<6.0.0
 numpy>=1.26.0
+
+# REQUIRED, not optional. trimesh.graph.connected_components needs a graph
+# engine (scipy or networkx) and raises ImportError("no graph engines
+# available!") without one. geometry.py wraps that call, so the failure was
+# silent: `shells` stayed at its default 1 and `fragments` stayed empty, which
+# means disconnected shells and scan islands were never detected at all — a
+# false "clean" on a scan with floating debris. networkx over scipy because it
+# is pure-Python and ~1 MB against ~35 MB, and this service runs on 512Mi.
+networkx>=3.0
