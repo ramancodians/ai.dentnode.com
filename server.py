@@ -36,6 +36,7 @@ from agent.runner import run_turn
 from agent.browser_runner import run_browser_turn
 from agent.scan_review import generate_scan_review
 from agent.usage import report_usage
+from agent.d10 import D10RequestContext, UsageOutbox, run_d10_turn
 
 # Standalone module — not part of Laby. Owns the /scan-review/* sub-namespace
 # (mesh QA from raw STL URLs); the flat POST /scan-review below is Laby's
@@ -51,6 +52,8 @@ from scan_qa import scan_qa_router
 setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
+d10_usage_outbox = UsageOutbox(settings.d10_usage_outbox_path)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -64,7 +67,21 @@ async def lifespan(_app: FastAPI):
             "Scan Review insecure fetch is ENABLED — private/loopback mesh URLs "
             "are reachable. Never use this outside local development."
         )
-    yield
+    await d10_usage_outbox.initialize()
+    d10_outbox_task = asyncio.create_task(
+        d10_usage_outbox.run(settings.d10_usage_flush_interval_secs)
+    )
+    try:
+        yield
+    finally:
+        d10_usage_outbox.stop()
+        try:
+            await asyncio.wait_for(d10_outbox_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            d10_outbox_task.cancel()
+        # Best effort only: records are already committed locally and will be
+        # retried on the next startup if D10 is temporarily unavailable.
+        await d10_usage_outbox.flush_once()
 
 
 app = FastAPI(title="Laby ADK Agent", version="1.0.0", lifespan=lifespan)
@@ -90,6 +107,17 @@ class RunRequest(BaseModel):
     question: str = Field(..., min_length=1)
     history: Optional[List[HistoryTurn]] = None
     mentions: Optional[List[MentionItem]] = None
+
+
+class D10HistoryTurn(BaseModel):
+    role: str
+    text: str = Field(..., min_length=1)
+
+
+class D10RunRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=16000)
+    context: D10RequestContext
+    history: Optional[List[D10HistoryTurn]] = Field(default=None, max_length=40)
 
 
 class InsightsRequest(BaseModel):
@@ -191,6 +219,13 @@ def _require_internal_key(provided: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Invalid internal key")
 
 
+def _require_d10_internal_key(provided: Optional[str]) -> None:
+    if not settings.d10_internal_key:
+        raise HTTPException(status_code=500, detail="D10_INTERNAL_KEY not configured")
+    if not provided or provided != settings.d10_internal_key:
+        raise HTTPException(status_code=401, detail="Invalid D10 internal key")
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     return {
@@ -249,6 +284,36 @@ async def agent_run(
         event_stream(),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache, no-transform"},
+    )
+
+
+@app.post("/d10/agent/run")
+async def d10_agent_run(
+    body: D10RunRequest,
+    x_d10_internal_key: Optional[str] = Header(
+        default=None, alias="x-d10-internal-key"
+    ),
+) -> StreamingResponse:
+    """Run one D10 Agent turn with D10-asserted identity and correlation."""
+    _require_d10_internal_key(x_d10_internal_key)
+    history = [turn.model_dump() for turn in (body.history or [])]
+
+    async def event_stream():
+        async for event in run_d10_turn(
+            message=body.message,
+            context=body.context,
+            history=history,
+            outbox=d10_usage_outbox,
+        ):
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Correlation-ID": body.context.correlation_id,
+        },
     )
 
 

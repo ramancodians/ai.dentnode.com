@@ -85,6 +85,33 @@ class Settings:
     # Node backend base URL (note the /api mount prefix).
     node_base_url: str = _get("NODE_INTERNAL_BASE_URL", "http://localhost:3000/api")
 
+    # D10.live is a separate trusted caller/ tool host.  Keep these settings
+    # distinct from the app.dentnode.com (Laby) integration above so either
+    # service can rotate credentials or move independently.  The key falls
+    # back to INTERNAL_API_KEY during the migration, but production should set
+    # D10_INTERNAL_KEY explicitly.
+    d10_internal_key: str = _get("D10_INTERNAL_KEY", "") or internal_key
+    d10_internal_base_url: str = _get(
+        "D10_INTERNAL_BASE_URL", "http://localhost:3000/api"
+    ).rstrip("/")
+    d10_agent_model: str = _openrouter_model(
+        _get("D10_AGENT_MODEL", "")
+        or _get("LABY_MODEL", "deepseek/deepseek-v4-flash")
+    )
+    d10_agent_timeout_secs: int = _int("D10_AGENT_TIMEOUT_SECS", 120)
+    d10_agent_max_model_calls: int = _int("D10_AGENT_MAX_MODEL_CALLS", 8)
+
+    # SQLite is an intentionally small durable outbox, not the billing source
+    # of truth.  In Cloud Run this path should point at a mounted persistent
+    # volume; local development may use the repository-local default.
+    d10_usage_outbox_path: str = _get(
+        "D10_USAGE_OUTBOX_PATH", ".data/d10-usage-outbox.sqlite3"
+    )
+    d10_usage_flush_interval_secs: int = _int(
+        "D10_USAGE_FLUSH_INTERVAL_SECS", 10
+    )
+    d10_usage_batch_size: int = _int("D10_USAGE_BATCH_SIZE", 100)
+
     # Short-term memory: how many recent thread turns to seed the session with.
     # Clamped to a safe range at read time; validate() checks the raw intent.
     history_turns: int = _int("LABY_HISTORY_TURNS", 12)
@@ -116,6 +143,29 @@ class Settings:
             raise RuntimeError(
                 f"LABY_TURN_TIMEOUT must be ≥ 10 seconds, got {self.turn_timeout_secs}"
             )
+        if not self.d10_internal_key:
+            raise RuntimeError(
+                "D10_INTERNAL_KEY (or fallback INTERNAL_API_KEY) is required"
+            )
+        if not self.d10_internal_base_url.startswith(("http://", "https://")):
+            raise RuntimeError(
+                "D10_INTERNAL_BASE_URL must be a valid http(s) URL, got: "
+                f"{self.d10_internal_base_url!r}"
+            )
+        if self.d10_agent_timeout_secs < 10:
+            raise RuntimeError(
+                "D10_AGENT_TIMEOUT_SECS must be ≥ 10 seconds, got "
+                f"{self.d10_agent_timeout_secs}"
+            )
+        if not (1 <= self.d10_agent_max_model_calls <= 32):
+            raise RuntimeError(
+                "D10_AGENT_MAX_MODEL_CALLS must be 1–32, got "
+                f"{self.d10_agent_max_model_calls}"
+            )
+        if self.d10_usage_flush_interval_secs < 1:
+            raise RuntimeError("D10_USAGE_FLUSH_INTERVAL_SECS must be at least 1")
+        if not (1 <= self.d10_usage_batch_size <= 1000):
+            raise RuntimeError("D10_USAGE_BATCH_SIZE must be 1–1000")
         if not self.openrouter_api_base.startswith(("http://", "https://")):
             raise RuntimeError(
                 "OPENROUTER_API_BASE must be a valid http(s) URL, got: "

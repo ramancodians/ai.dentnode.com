@@ -85,6 +85,23 @@ jobs:
           ENV_VARS="${ENV_VARS}@OPENROUTER_API_BASE=https://openrouter.ai/api/v1"
           ENV_VARS="${ENV_VARS}@OPENROUTER_SITE_URL=https://ai.dentnode.com"
           ENV_VARS="${ENV_VARS}@OPENROUTER_APP_NAME=DentNode Laby"
+          # D10.live agent boundary. D10 calls POST /d10/agent/run here, and this
+          # service calls D10 back at ${D10_INTERNAL_BASE_URL}/internal/agent/tools/*
+          # and /internal/ai/usage-events. D10 mounts those under /api, so the
+          # trailing /api is required — without it the requests hit D10's SPA
+          # fallback and come back as 200 text/html instead of JSON.
+          ENV_VARS="${ENV_VARS}@D10_INTERNAL_BASE_URL=https://d10.live/api"
+          ENV_VARS="${ENV_VARS}@D10_AGENT_MODEL=deepseek/deepseek-v4-flash"
+          ENV_VARS="${ENV_VARS}@D10_AGENT_TIMEOUT_SECS=120"
+          ENV_VARS="${ENV_VARS}@D10_AGENT_MAX_MODEL_CALLS=8"
+          # Usage outbox. Cloud Run has no durable local disk, so this is a
+          # crash buffer, not storage: the lifespan shutdown hook flushes it on
+          # SIGTERM. /tmp is the only path writable by the non-root `laby` user
+          # without adding a volume — do NOT use /var/lib here, the container
+          # cannot mkdir there and the service will fail to start.
+          ENV_VARS="${ENV_VARS}@D10_USAGE_OUTBOX_PATH=/tmp/d10-usage-outbox.sqlite3"
+          ENV_VARS="${ENV_VARS}@D10_USAGE_FLUSH_INTERVAL_SECS=10"
+          ENV_VARS="${ENV_VARS}@D10_USAGE_BATCH_SIZE=100"
           # Scan Review (standalone mesh QA module).
           ENV_VARS="${ENV_VARS}@SCAN_REVIEW_VISION_MODEL=qwen/qwen3-vl-32b-instruct"
           ENV_VARS="${ENV_VARS}@SCAN_REVIEW_MODEL=qwen/qwen3-vl-32b-instruct"
@@ -105,7 +122,7 @@ jobs:
             --ingress=all \
             --memory=512Mi \
             --set-env-vars="$ENV_VARS" \
-            --set-secrets=INTERNAL_API_KEY=LABY_INTERNAL_API_KEY:latest,OPENROUTER_API_KEY=LABY_OPENROUTER_API_KEY:latest \
+            --set-secrets=INTERNAL_API_KEY=LABY_INTERNAL_API_KEY:latest,OPENROUTER_API_KEY=LABY_OPENROUTER_API_KEY:latest,D10_INTERNAL_KEY=LABY_D10_INTERNAL_KEY:latest \
             $NO_TRAFFIC_FLAG --quiet
 
       - id: revision

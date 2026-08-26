@@ -53,6 +53,12 @@ class ChatResult:
     usage: Dict[str, int] = field(default_factory=dict)
     cost_usd: Optional[float] = None
     latency_ms: int = 0
+    # The fields below preserve provider-native accounting for financial-grade
+    # metering while remaining backwards-compatible with existing callers.
+    provider: str = "openrouter"
+    request_id: Optional[str] = None
+    message: Dict[str, Any] = field(default_factory=dict)
+    raw_usage: Dict[str, Any] = field(default_factory=dict)
 
 
 def _strip_route_prefix(model: str) -> str:
@@ -72,10 +78,32 @@ def _extract_usage(raw_usage: Dict[str, Any]) -> Dict[str, int]:
         except (TypeError, ValueError):
             return 0
 
+    prompt_details = raw_usage.get("prompt_tokens_details") or {}
+    completion_details = raw_usage.get("completion_tokens_details") or {}
     return {
         "prompt_tokens": _int(raw_usage.get("prompt_tokens")),
         "completion_tokens": _int(raw_usage.get("completion_tokens")),
         "total_tokens": _int(raw_usage.get("total_tokens")),
+        "cached_input_tokens": _int(
+            prompt_details.get("cached_tokens", raw_usage.get("cached_tokens"))
+        ),
+        "reasoning_tokens": _int(
+            completion_details.get(
+                "reasoning_tokens", raw_usage.get("reasoning_tokens")
+            )
+        ),
+        "image_input_units": _int(
+            prompt_details.get("image_tokens", raw_usage.get("image_tokens"))
+        ),
+        "audio_input_units": _int(
+            prompt_details.get("audio_tokens", raw_usage.get("audio_tokens"))
+        ),
+        "video_input_units": _int(
+            prompt_details.get("video_tokens", raw_usage.get("video_tokens"))
+        ),
+        "image_output_units": _int(completion_details.get("image_tokens")),
+        "audio_output_units": _int(completion_details.get("audio_tokens")),
+        "video_output_units": _int(completion_details.get("video_tokens")),
     }
 
 
@@ -159,7 +187,8 @@ async def chat_completion(
     if not choices:
         raise OpenRouterError("OpenRouter response had no choices")
 
-    text = (choices[0].get("message") or {}).get("content") or ""
+    message = choices[0].get("message") or {}
+    text = message.get("content") or ""
 
     raw_usage = data.get("usage") or {}
     usage = _extract_usage(raw_usage)
@@ -178,4 +207,8 @@ async def chat_completion(
         usage=usage,
         cost_usd=cost_usd,
         latency_ms=latency_ms,
+        provider=data.get("provider") or "openrouter",
+        request_id=data.get("id") or resp.headers.get("x-request-id"),
+        message=message,
+        raw_usage=raw_usage,
     )
