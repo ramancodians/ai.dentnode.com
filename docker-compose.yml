@@ -26,6 +26,20 @@ services:
       INTERNAL_API_KEY: "${INTERNAL_API_KEY:-dev-internal-key}"
       # Reach the host's Node dev server (note the /api prefix).
       NODE_INTERNAL_BASE_URL: "http://host.docker.internal:3001/api"
+      # D10 Agent tool host and metering ledger.
+      D10_INTERNAL_KEY: "${D10_INTERNAL_KEY:-dev-d10-internal-key}"
+      D10_INTERNAL_BASE_URL: "http://host.docker.internal:3000/api"
+      D10_AGENT_MODEL: "deepseek/deepseek-v4-flash"
+      D10_AGENT_TIMEOUT_SECS: "120"
+      D10_AGENT_MAX_MODEL_CALLS: "8"
+      D10_USAGE_OUTBOX_PATH: "/var/lib/d10-agent/d10-usage-outbox.sqlite3"
+      D10_USAGE_FLUSH_INTERVAL_SECS: "10"
+      D10_USAGE_BATCH_SIZE: "100"
       LABY_HISTORY_TURNS: "12"
+    volumes:
+      - d10-agent-data:/var/lib/d10-agent
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+volumes:
+  d10-agent-data:

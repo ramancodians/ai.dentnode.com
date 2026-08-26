@@ -6,6 +6,41 @@ Newest first. Each entry records what changed, plus anything that must be true i
 the environment for it to run — this service is deployed to Cloud Run by CI, so
 missing env vars and Secret Manager entries are the usual cause of a failed rollout.
 
+## [Unreleased] — D10 agent config reaches the deployed service
+
+**Fixed**
+
+- The eight `D10_*` variables the D10 agent reads were missing from
+  `.github/workflows/cloud-run-deploy.yaml`. That file is the *whole* literal-env
+  surface — `--set-env-vars` replaces the list, so anything absent from it simply
+  does not exist on the revision. The live service (`laby-agent-00031-deh`) has
+  none of them. Merging the D10 agent without this would have deployed a service
+  that starts cleanly and then fails every D10 call, because
+  `D10_INTERNAL_BASE_URL` falls back to its `http://localhost:3000/api` default
+  and `D10_INTERNAL_KEY` falls back to `INTERNAL_API_KEY`, which is a different
+  secret than the one D10 sends.
+- `D10_INTERNAL_BASE_URL=https://d10.live/api`. The `/api` suffix is load-bearing:
+  D10 mounts the gateway at `app.use('/api/internal/agent/tools', …)`, and a
+  request to `/internal/agent/tools/catalog` without it falls through to D10's
+  SPA static handler and returns **200 with an HTML body** rather than a 404 —
+  a misconfiguration that would have looked like a JSON parse bug.
+- `D10_INTERNAL_KEY` is now injected from Secret Manager as
+  `LABY_D10_INTERNAL_KEY`, alongside the two secrets already wired. The secret
+  was created with a fresh value and read access granted to the service's runtime
+  identity (`840065687221-compute@developer.gserviceaccount.com`). **D10's
+  `D10_PRODUCTION_ENV` must carry the same value or every call is a 401.**
+- `D10_USAGE_OUTBOX_PATH` is `/tmp/d10-usage-outbox.sqlite3`, not the
+  `/var/lib/d10-agent/…` that `.env.production` used to document. `UsageOutbox.
+  initialize()` does `parent.mkdir(parents=True)` during lifespan startup, and the
+  image runs as non-root `laby` (uid 10001), which cannot create a directory under
+  root-owned `/var/lib`. That would have raised `PermissionError` before the first
+  health check and failed the rollout. `.env.production` and `.env.example` were
+  corrected to match.
+
+Cloud Run gives the container no durable local disk, so the outbox is a crash
+buffer rather than storage. The shutdown hook flushes it on SIGTERM, leaving only
+an ungraceful kill (OOM, hard crash) as a loss window for usage events.
+
 ## [Unreleased] — Scan Review never detected disconnected shells
 
 **Fixed**
