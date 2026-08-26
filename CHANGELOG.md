@@ -6,6 +6,30 @@ Newest first. Each entry records what changed, plus anything that must be true i
 the environment for it to run — this service is deployed to Cloud Run by CI, so
 missing env vars and Secret Manager entries are the usual cause of a failed rollout.
 
+## [Unreleased] — Legacy timezone aliases took the D10 assistant down
+
+**Fixed**
+
+- `tzdata` added to `requirements.txt`. `python:3.12-slim` ships a
+  `/usr/share/zoneinfo` holding the canonical zones but **not** the "backward"
+  compatibility links, and `zoneinfo` consults the `tzdata` package only when a
+  name is absent from `TZPATH`. With neither present, `ZoneInfo("Asia/Calcutta")`
+  raised, `D10RequestContext.validate_timezone` rejected the turn with a **422**,
+  `D10AgentClient` threw on the non-ok response, and D10 rendered that to the user
+  as *"The assistant is unavailable right now."* — about 150 ms after asking.
+- Measured against the deployed revision: every canonical zone was accepted
+  (`Asia/Kolkata`, `America/New_York`, `Europe/Kyiv`, `UTC`) and every legacy link
+  was rejected (`Asia/Calcutta`, `US/Eastern`, `Europe/Kiev`, `Asia/Rangoon`).
+  **Chrome on Windows reports `Asia/Calcutta`**, so this was not an edge case — it
+  broke the assistant for real users on the most common desktop configuration.
+- Regression test empties `TZPATH` before validating each alias. Asserting against
+  the default path would have passed on a CI runner with a complete system tz
+  database *and* with `tzdata` uninstalled — hiding the exact bug it guards.
+
+The validator itself is unchanged and still rejects genuine nonsense: a legacy
+alias is a valid IANA identifier, so the fix is to ship a complete database rather
+than to loosen the check.
+
 ## [Unreleased] — D10 agent config reaches the deployed service
 
 **Fixed**

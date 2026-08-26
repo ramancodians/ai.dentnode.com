@@ -26,3 +26,14 @@ numpy>=1.26.0
 # false "clean" on a scan with floating debris. networkx over scipy because it
 # is pure-Python and ~1 MB against ~35 MB, and this service runs on 512Mi.
 networkx>=3.0
+
+# REQUIRED, not optional — same class of bug as networkx above. python:3.12-slim
+# ships a /usr/share/zoneinfo with the canonical zones but WITHOUT the "backward"
+# compatibility links, and zoneinfo only falls back to this package when the name
+# is absent from TZPATH. Without it ZoneInfo("Asia/Calcutta") raises, and the D10
+# context validator rejects the turn with a 422 — which D10 surfaces to the user
+# as "The assistant is unavailable right now". Chrome on Windows reports the
+# legacy alias, so this took out real traffic. Do not drop it because "nothing
+# imports tzdata": nothing does, and that is exactly the point.
+tzdata>=2025.1
+

@@ -1,6 +1,7 @@
 """Endpoint and orchestration tests for the isolated D10 Agent."""
 
 import json
+import zoneinfo
 
 import pytest
 
@@ -64,6 +65,32 @@ def test_d10_endpoint_passes_trusted_context_and_returns_ndjson(client, monkeypa
 def test_d10_endpoint_rejects_unknown_timezone(client):
     body = {**_BODY, "context": {**_CONTEXT, "timezone": "India/Definitely-Not-Real"}}
     assert client.post("/d10/agent/run", json=body, headers=_HEADERS).status_code == 422
+
+
+# Legacy IANA "backward" links — every one of these is a real value a browser
+# reports. Chrome on Windows says Asia/Calcutta, not Asia/Kolkata.
+_LEGACY_TZ_ALIASES = ["Asia/Calcutta", "US/Eastern", "Europe/Kiev", "Asia/Rangoon"]
+
+
+@pytest.mark.parametrize("alias", _LEGACY_TZ_ALIASES)
+def test_d10_endpoint_accepts_legacy_timezone_aliases(client, alias):
+    """Legacy aliases must validate using ONLY the bundled tzdata package.
+
+    python:3.12-slim ships a /usr/share/zoneinfo carrying the canonical zones but
+    not the backward links, and `zoneinfo` consults the tzdata package only when
+    the name is missing from TZPATH. CI runners have a complete system database,
+    so asserting against the default TZPATH would pass with tzdata uninstalled and
+    hide the exact bug this guards — emptying TZPATH is what reproduces the image.
+
+    Regression: without tzdata these 422'd, and D10 rendered that to the user as
+    "The assistant is unavailable right now."
+    """
+    zoneinfo.reset_tzpath([])
+    try:
+        body = {**_BODY, "context": {**_CONTEXT, "timezone": alias}}
+        assert client.post("/d10/agent/run", json=body, headers=_HEADERS).status_code != 422
+    finally:
+        zoneinfo.reset_tzpath()
 
 
 class _Outbox:
