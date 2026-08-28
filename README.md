@@ -49,6 +49,7 @@ Node's `AiUsageEvent` ledger via `POST /api/internal/ai-usage`.
 | `POST /scan-review` | Oral Scanner AI Review over arch renders | `LABY_VISION_MODEL` |
 | `POST /rejected-cases-report` | Rejected-cases ops report (Node cron) | `LABY_VISION_MODEL` |
 | `POST /product-update-email` | Weekly product-update marketing copy (Node cron) | `LABY_MODEL` |
+| `POST /audio-to-text` | **Audio-to-Text** — transcribe + summarise a Digital Ocean audio URL (shared by app.dentnode.com + d10.live) | `AUDIO_TO_TEXT_MODEL` |
 | `POST /scan-review/analyze` | **Scan Review** — mesh QA from raw STL URLs (standalone module, not Laby) | `SCAN_REVIEW_MODEL` |
 | `GET /scan-review/health` | Scan Review config/readiness (no auth) | — |
 | `GET /health` | Liveness/readiness (no auth) | — |

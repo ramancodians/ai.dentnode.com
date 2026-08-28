@@ -112,6 +112,35 @@ class Settings:
     )
     d10_usage_batch_size: int = _int("D10_USAGE_BATCH_SIZE", 100)
 
+    # Audio-to-Text agent: transcribe a Digital Ocean audio URL and summarise
+    # it. A single-call feature agent (no ADK tool loop) shared by both
+    # app.dentnode.com and d10.live. The audio model must accept multimodal
+    # `input_audio` content parts — the OpenRouter catalog currently exposes
+    # `openai/gpt-audio` / `openai/gpt-audio-mini` for this.
+    audio_to_text_model: str = _openrouter_model(
+        _get("AUDIO_TO_TEXT_MODEL", "openai/gpt-audio-mini")
+    )
+    audio_to_text_timeout_secs: int = _int("AUDIO_TO_TEXT_TIMEOUT_SECS", 120)
+    audio_to_text_max_bytes: int = _int("AUDIO_TO_TEXT_MAX_BYTES", 25 * 1024 * 1024)
+    audio_to_text_fetch_timeout_secs: int = _int(
+        "AUDIO_TO_TEXT_FETCH_TIMEOUT_SECS", 30
+    )
+    # Comma-separated host allowlist for audio downloads. Defaults to Digital
+    # Ocean Spaces (origin + CDN). A leading-dot entry matches any subdomain.
+    audio_to_text_allowed_hosts: tuple = tuple(
+        h.strip().lower()
+        for h in _get(
+            "AUDIO_TO_TEXT_ALLOWED_HOSTS",
+            ".digitaloceanspaces.com,.cdn.digitaloceanspaces.com",
+        ).split(",")
+        if h.strip()
+    )
+    # Local-dev escape hatch (mirrors SCAN_REVIEW_ALLOW_INSECURE_FETCH): permits
+    # http:// and non-public hosts so a local sample file can be transcribed.
+    audio_to_text_allow_insecure_fetch: bool = (
+        _get("AUDIO_TO_TEXT_ALLOW_INSECURE_FETCH", "0").lower() in ("1", "true", "yes")
+    )
+
     # Short-term memory: how many recent thread turns to seed the session with.
     # Clamped to a safe range at read time; validate() checks the raw intent.
     history_turns: int = _int("LABY_HISTORY_TURNS", 12)
@@ -166,6 +195,20 @@ class Settings:
             raise RuntimeError("D10_USAGE_FLUSH_INTERVAL_SECS must be at least 1")
         if not (1 <= self.d10_usage_batch_size <= 1000):
             raise RuntimeError("D10_USAGE_BATCH_SIZE must be 1–1000")
+        if self.audio_to_text_timeout_secs < 10:
+            raise RuntimeError(
+                "AUDIO_TO_TEXT_TIMEOUT_SECS must be ≥ 10 seconds, got "
+                f"{self.audio_to_text_timeout_secs}"
+            )
+        if not (1 <= self.audio_to_text_max_bytes <= 100 * 1024 * 1024):
+            raise RuntimeError(
+                "AUDIO_TO_TEXT_MAX_BYTES must be 1–100 MiB, got "
+                f"{self.audio_to_text_max_bytes}"
+            )
+        if self.audio_to_text_fetch_timeout_secs < 1:
+            raise RuntimeError(
+                "AUDIO_TO_TEXT_FETCH_TIMEOUT_SECS must be at least 1"
+            )
         if not self.openrouter_api_base.startswith(("http://", "https://")):
             raise RuntimeError(
                 "OPENROUTER_API_BASE must be a valid http(s) URL, got: "

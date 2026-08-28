@@ -20,6 +20,8 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from agent.audio_fetch import AudioFetchError, fetch_audio
+from agent.audio_to_text import UnsupportedAudioFormat, transcribe_audio
 from agent.case_from_image import CaseExtractionError, extract_case_from_image
 from agent.config import settings
 from agent.insights import generate_insights
@@ -192,6 +194,17 @@ class ImageToEntryRequest(BaseModel):
     user_id: Optional[str] = None
 
 
+class AudioToTextRequest(BaseModel):
+    """Shared by app.dentnode.com and d10.live. `summary` (default True) adds a
+    concise summary to the verbatim transcript; the audio must be a Digital
+    Ocean object URL."""
+
+    audio_url: str = Field(..., min_length=1, max_length=2048)
+    summary: bool = True
+    lab_id: Optional[str] = None
+    user_id: Optional[str] = None
+
+
 # Every AiUsageEvent needs a lab_id, but the weekly product-update email is
 # platform marketing — it belongs to no lab. Rather than drop the row (and lose
 # the spend from the ledger) or invent a fake lab, it is attributed to this
@@ -224,6 +237,21 @@ def _require_d10_internal_key(provided: Optional[str]) -> None:
         raise HTTPException(status_code=500, detail="D10_INTERNAL_KEY not configured")
     if not provided or provided != settings.d10_internal_key:
         raise HTTPException(status_code=401, detail="Invalid D10 internal key")
+
+
+def _require_shared_internal_key(
+    provided_internal: Optional[str], provided_d10: Optional[str]
+) -> None:
+    """Accept either the app.dentnode.com key or the D10 key.
+
+    The Audio-to-Text agent is shared between the two services, so either
+    trusted caller may invoke it.
+    """
+    if settings.internal_key and provided_internal == settings.internal_key:
+        return
+    if settings.d10_internal_key and provided_d10 == settings.d10_internal_key:
+        return
+    raise HTTPException(status_code=401, detail="Invalid internal key")
 
 
 @app.get("/health")
@@ -315,6 +343,80 @@ async def d10_agent_run(
             "X-Correlation-ID": body.context.correlation_id,
         },
     )
+
+
+@app.post("/audio-to-text")
+async def audio_to_text(
+    body: AudioToTextRequest,
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_internal_id: Optional[str] = Header(default=None, alias="x-internal-id"),
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, Any]:
+    """Transcribe + summarise a Digital Ocean audio URL.
+
+    Shared by app.dentnode.com (x-internal-key) and d10.live
+    (x-d10-internal-key). Only Digital Ocean URLs are accepted.
+    """
+    _require_shared_internal_key(x_internal_key or x_internal_id, x_d10_internal_key)
+
+    try:
+        audio = await fetch_audio(body.audio_url)
+    except AudioFetchError as exc:
+        logger.warning("Audio fetch rejected", extra={"error": str(exc)})
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    lab_id = body.lab_id or PLATFORM_LAB_ID
+
+    try:
+        result = await transcribe_audio(
+            audio_bytes=audio.data,
+            audio_format=audio.format,
+            summary=body.summary,
+        )
+    except UnsupportedAudioFormat as exc:
+        raise HTTPException(status_code=415, detail=str(exc))
+    except OpenRouterError as exc:
+        logger.error(
+            "Audio-to-text generation failed",
+            extra={"lab_id": lab_id, "error": str(exc)},
+        )
+        _fire_and_forget(
+            report_usage(
+                feature="audio_to_text",
+                lab_id=lab_id,
+                user_id=body.user_id,
+                model=settings.audio_to_text_model,
+                status="error",
+            )
+        )
+        raise HTTPException(status_code=502, detail="Audio-to-text model call failed")
+
+    _fire_and_forget(
+        report_usage(
+            feature="audio_to_text",
+            lab_id=lab_id,
+            user_id=body.user_id,
+            model=result.model,
+            usage=result.usage,
+            cost=result.cost_usd,
+            cost_source="openrouter" if result.cost_usd is not None else "estimated",
+            latency_ms=result.latency_ms,
+            status="ok",
+            meta={
+                "audio_bytes": result.audio_bytes,
+                "audio_format": result.audio_format,
+            },
+        )
+    )
+
+    return {
+        "success": True,
+        "transcript": result.transcript,
+        "summary": result.summary,
+        "model": result.model,
+        "audio_format": result.audio_format,
+        "audio_bytes": result.audio_bytes,
+    }
 
 
 @app.post("/insights")

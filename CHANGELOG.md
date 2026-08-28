@@ -6,6 +6,30 @@ Newest first. Each entry records what changed, plus anything that must be true i
 the environment for it to run — this service is deployed to Cloud Run by CI, so
 missing env vars and Secret Manager entries are the usual cause of a failed rollout.
 
+## [Unreleased] — Audio-to-Text endpoint
+
+**Added**
+
+- `POST /audio-to-text`: transcribes an audio file at a caller-supplied Digital
+  Ocean URL and optionally summarises it. A single-call feature agent — no ADK
+  session, no tool loop — shared by both callers, `app.dentnode.com` via
+  `x-internal-key` and `d10.live` via `x-d10-internal-key`. New modules
+  `agent/audio_fetch.py` and `agent/audio_to_text.py`, covered by
+  `tests/test_audio_to_text.py`.
+- The model must accept multimodal `input_audio` content parts; the OpenRouter
+  catalog currently exposes `openai/gpt-audio` / `openai/gpt-audio-mini`.
+  `AUDIO_TO_TEXT_MODEL` defaults to the mini variant.
+
+**Environment — required for the rollout**
+
+- `AUDIO_TO_TEXT_*` added to the deploy workflow's `ENV_VARS`. `--set-env-vars`
+  replaces the whole literal-env list, so a variable read by `agent/config.py`
+  but missing there is simply deleted from the next revision and the code
+  default silently takes over. That is tolerable for a timeout; it is not for
+  `AUDIO_TO_TEXT_ALLOWED_HOSTS`, which is the SSRF control on an endpoint that
+  dereferences a caller-supplied URL. All seven are now pinned in the workflow,
+  matching the rule stated in its own comment.
+
 ## [Unreleased] — Legacy timezone aliases took the D10 assistant down
 
 **Fixed**
