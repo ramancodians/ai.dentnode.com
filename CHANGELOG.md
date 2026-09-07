@@ -6,6 +6,67 @@ Newest first. Each entry records what changed, plus anything that must be true i
 the environment for it to run — this service is deployed to Cloud Run by CI, so
 missing env vars and Secret Manager entries are the usual cause of a failed rollout.
 
+## [Unreleased] — Text-to-Speech endpoint
+
+**Added**
+
+- `POST /text-to-speech`: synthesises speech from text and streams the audio
+  bytes back. A single-call feature agent — no ADK session, no tool loop — open
+  to every trusted internal caller, `app.dentnode.com` via `x-internal-key` and
+  `d10.live` via `x-d10-internal-key`, the same shared-key pattern as
+  `/audio-to-text`. It **stores nothing**: retention is the calling
+  application's decision. New module `agent/text_to_speech.py`, covered by
+  `tests/test_text_to_speech.py`.
+- `GET /text-to-speech/voices`: the accepted voices, formats, default and
+  character cap, so a caller does not have to hardcode them.
+- Streaming is the default (`stream: true`) — first bytes leave under a second,
+  so a caller can start playback while the rest arrives. `stream: false`
+  returns one buffered file with a `Content-Length`, an exact-size WAV header,
+  and the `X-TTS-Audio-Ms` / `X-TTS-Cost-Usd` / `X-TTS-Transcript-B64` headers
+  that a streaming response cannot carry.
+- Metered into the `AiUsageEvent` ledger as `feature="text_to_speech"`, with
+  OpenRouter's exact cost. Calls without a `lab_id` book to `__platform__`.
+
+**Model choice is a pricing decision**
+
+- There is **no free text-to-speech model on OpenRouter**. Of 430 models in the
+  catalog exactly four emit the `audio` output modality: two Lyria models
+  (music generation, not speech) and `openai/gpt-audio` /
+  `openai/gpt-audio-mini`. `TEXT_TO_SPEECH_MODEL` defaults to the mini variant,
+  which is 26.7x cheaper per audio output token ($0.0000024 vs $0.000064).
+  Measured end to end that is **~$0.0043 per minute of speech**; a 6.4-second
+  notification cost $0.000438. `TEXT_TO_SPEECH_MAX_CHARS` caps a single call's
+  spend, since audio output is billed per second of speech.
+
+**Why the output is WAV and not MP3**
+
+- OpenRouter rejects `modalities: ["text","audio"]` without `stream: true`, and
+  once streaming it rejects every container except `pcm16`. MP3/Opus/AAC are
+  unreachable on this path at any price. The module receives raw 24 kHz mono
+  16-bit PCM and writes the 44-byte RIFF header itself — no encoder, no ffmpeg,
+  no new dependency, nothing added to a 512Mi image. Both constraints are
+  pinned by `test_request_body_pins_the_openrouter_audio_contract`, because
+  they are not stated anywhere in the model catalog and were found by probing.
+- A **streaming** WAV carries `0xFFFFFFFF` in its two RIFF size fields, since
+  the length is unknown when the header goes out. ffmpeg, ffprobe and browsers
+  read such a file correctly (verified: ffprobe reports the true 7.65 s);
+  anything trusting the size field verbatim — Python's `wave`, some metadata
+  scrapers — will report a nonsense duration. Callers needing exact file
+  metadata should send `stream: false`. The streaming response says so via
+  `X-TTS-Streaming: chunked`.
+
+**Environment — required for the rollout**
+
+- `TEXT_TO_SPEECH_MODEL`, `TEXT_TO_SPEECH_VOICE`, `TEXT_TO_SPEECH_TIMEOUT_SECS`
+  and `TEXT_TO_SPEECH_MAX_CHARS` added to `.env.example` **and** to the deploy
+  workflow's `ENV_VARS`. `--set-env-vars` replaces the whole literal-env list,
+  so a variable read by `agent/config.py` but missing there is deleted from the
+  next revision and the code default silently takes over — which for
+  `TEXT_TO_SPEECH_MODEL` would mean silently changing what the platform spends
+  per minute of audio.
+- No new secret. The service still holds exactly one provider credential
+  (`OPENROUTER_API_KEY`); this feature adds no direct-to-provider path.
+
 ## [Unreleased] — Audio-to-Text endpoint
 
 **Added**

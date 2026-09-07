@@ -141,6 +141,23 @@ class Settings:
         _get("AUDIO_TO_TEXT_ALLOW_INSECURE_FETCH", "0").lower() in ("1", "true", "yes")
     )
 
+    # Text-to-Speech agent: synthesise spoken audio from text and stream it
+    # back. A single-call feature agent (no ADK tool loop) open to every trusted
+    # internal caller. The model must emit the `audio` output modality — of the
+    # whole OpenRouter catalog only openai/gpt-audio, openai/gpt-audio-mini and
+    # the two Lyria music models do, and there is no free option among them.
+    # The mini variant is the default because it is 26.7x cheaper per audio
+    # output token ($0.0000024 vs $0.000064), which works out at roughly
+    # $0.0043 per minute of speech. Changing this knob is a spend decision.
+    text_to_speech_model: str = _openrouter_model(
+        _get("TEXT_TO_SPEECH_MODEL", "openai/gpt-audio-mini")
+    )
+    text_to_speech_voice: str = _get("TEXT_TO_SPEECH_VOICE", "alloy")
+    text_to_speech_timeout_secs: int = _int("TEXT_TO_SPEECH_TIMEOUT_SECS", 120)
+    # Cost control, not a technical limit: audio output is billed per second of
+    # speech, so the character cap is what bounds the spend of a single call.
+    text_to_speech_max_chars: int = _int("TEXT_TO_SPEECH_MAX_CHARS", 4000)
+
     # Short-term memory: how many recent thread turns to seed the session with.
     # Clamped to a safe range at read time; validate() checks the raw intent.
     history_turns: int = _int("LABY_HISTORY_TURNS", 12)
@@ -208,6 +225,16 @@ class Settings:
         if self.audio_to_text_fetch_timeout_secs < 1:
             raise RuntimeError(
                 "AUDIO_TO_TEXT_FETCH_TIMEOUT_SECS must be at least 1"
+            )
+        if self.text_to_speech_timeout_secs < 10:
+            raise RuntimeError(
+                "TEXT_TO_SPEECH_TIMEOUT_SECS must be ≥ 10 seconds, got "
+                f"{self.text_to_speech_timeout_secs}"
+            )
+        if not (1 <= self.text_to_speech_max_chars <= 100_000):
+            raise RuntimeError(
+                "TEXT_TO_SPEECH_MAX_CHARS must be 1–100000, got "
+                f"{self.text_to_speech_max_chars}"
             )
         if not self.openrouter_api_base.startswith(("http://", "https://")):
             raise RuntimeError(
