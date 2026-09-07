@@ -1,0 +1,41 @@
+name: CI
+
+# cloud-run-deploy.yaml runs the suite too, but only on a push to main — by
+# which point a bad change is already merged, and main goes red instead of the
+# PR. This is the same suite as a pre-merge gate.
+#
+# It deliberately does NOT extend the deploy workflow with a pull_request
+# trigger: that workflow authenticates to GCP and ships a revision, and neither
+# belongs on an unmerged branch.
+on:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Same install and invocation as the deploy workflow's gate, so a green
+      # PR here means a green deploy there.
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      # No secrets: tests/conftest.py sets every environment variable the app
+      # reads, and the suite mocks OpenRouter rather than calling it.
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
