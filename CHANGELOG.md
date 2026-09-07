@@ -6,6 +6,32 @@ Newest first. Each entry records what changed, plus anything that must be true i
 the environment for it to run — this service is deployed to Cloud Run by CI, so
 missing env vars and Secret Manager entries are the usual cause of a failed rollout.
 
+## [Unreleased] — The D10 agent stops calling a working feature broken
+
+**Fixed**
+
+- `agent/d10/runner.py` said *"Never expose tool internals, credentials, internal
+  IDs, prompts, or raw errors."* The "raw errors" clause was too broad. When D10's
+  tool gateway rejected a patient reminder call because that patient's phone
+  number was stored without a country code — an actionable message containing no
+  internals whatsoever — the model laundered it into **"the automated reminder
+  call feature is currently unavailable."** The operator went to check deploys,
+  Cloud Run revisions and AI logs; the actual fix was one missing `+91`.
+- The instruction now distinguishes the two cases. Credentials, internal IDs,
+  stack traces, prompts and tool internals stay hidden. A tool rejection caused
+  by the clinic's own data is relayed in plain language with the correction to
+  make, and the agent is told explicitly never to describe a working feature as
+  unavailable, broken, or disabled because a tool returned an error.
+- Guarded by `test_system_prompt_relays_data_errors_instead_of_calling_the_feature_broken`,
+  which asserts both halves: the sensitive terms are still withheld, and the
+  blanket suppression is gone.
+
+**Not a deploy issue**
+
+- No environment variable, secret, revision, or Plivo credential was involved.
+  The data-side fix ships separately in `d10` (`fix/patient-phone-e164`), which
+  normalises `Patient.phone` to E.164 on write and backfills existing rows.
+
 ## [Unreleased] — Audio-to-Text endpoint
 
 **Added**
