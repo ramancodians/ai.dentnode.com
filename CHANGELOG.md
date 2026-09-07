@@ -6,6 +6,21 @@ Newest first. Each entry records what changed, plus anything that must be true i
 the environment for it to run — this service is deployed to Cloud Run by CI, so
 missing env vars and Secret Manager entries are the usual cause of a failed rollout.
 
+## [Unreleased] — Pull requests run the suite before merge
+
+**Added**
+
+- `.github/workflows/ci.yaml` runs `pytest` on every pull request. The suite
+  already ran inside `cloud-run-deploy.yaml`, but only on a push to `main` — by
+  which point a bad change is merged and it is `main` that goes red, not the PR.
+  Two PRs in this repo showed no checks at all.
+- It deliberately does **not** add a `pull_request` trigger to the deploy
+  workflow: that job authenticates to GCP and ships a revision, and neither
+  belongs on an unmerged branch. Same install and invocation as the deploy
+  gate, so a green PR means a green deploy.
+- No secrets needed — `tests/conftest.py` sets every environment variable the
+  app reads and the suite mocks OpenRouter rather than calling it.
+
 ## [Unreleased] — Audio-to-Text endpoint
 
 **Added**
