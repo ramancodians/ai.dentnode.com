@@ -6,6 +6,60 @@ Newest first. Each entry records what changed, plus anything that must be true i
 the environment for it to run — this service is deployed to Cloud Run by CI, so
 missing env vars and Secret Manager entries are the usual cause of a failed rollout.
 
+## [Unreleased] — Speaker diarization on /audio-to-text, and full env parity
+
+**Changed — /audio-to-text now uses a transcription model, not a chat model**
+
+- `agent/audio_to_text.py` calls OpenRouter's `POST /audio/transcriptions`
+  endpoint directly instead of routing an `input_audio` content part through
+  Chat Completions. Still OpenRouter-only: same single `OPENROUTER_API_KEY`, no
+  provider SDK, no direct-to-provider request.
+- `AUDIO_TO_TEXT_MODEL` moves from `openai/gpt-audio-mini` to
+  `microsoft/mai-transcribe-2`, which exposes Azure's diarization through
+  OpenRouter. The request asks for `verbose_json` with segment and word
+  timestamps and `provider.options.azure.diarization.enabled`.
+- The response gains a `segments[]` array — start, end, text and a
+  **recording-local** speaker id per segment. Recording-local means speaker `0`
+  in one recording is not the same person as speaker `0` in another; there is no
+  cross-recording voice identity here, and callers must not treat it as one. The
+  usage event carries the segment count as `meta.speaker_segments`.
+- The optional summary is now a second, separate call written by `LABY_MODEL` —
+  the transcription endpoint returns a transcript only, so the previous
+  one-call "transcript + summary in one completion" split is gone. A summarised
+  request therefore books two provider calls, not one.
+
+**Changed — every env surface now carries every variable**
+
+- `.env`, `.env.production` and the deploy workflow's `ENV_VARS` were each
+  missing variables that `agent/config.py` and `scan_review/config.py` actually
+  read — 25 in `.env`, 24 in `.env.production`. All four surfaces (`.env`,
+  `.env.production`, `.env.example`, workflow) now agree, verified by diffing
+  the parsed key sets against the names read in code.
+- The three deliberate exclusions stay: `PORT` is injected by Cloud Run and
+  rejected by `--set-env-vars`; `LABY_AGENT_URL` and `REDIS_URL` are
+  cross-service parity entries this Python service never reads.
+- Environment-specific values are the only differences left between
+  `.env.example` and `.env.production`: `NODE_INTERNAL_BASE_URL`,
+  `D10_INTERNAL_BASE_URL`, `D10_USAGE_OUTBOX_PATH` (`/tmp`, the only path the
+  non-root `laby` user can write), `SCAN_REVIEW_ALLOWED_HOSTS` (pinned to
+  `storage.googleapis.com` in production, open locally) and `LABY_AGENT_URL`.
+- `.env.production`'s `LABY_AGENT_URL` placeholder replaced with the real
+  service URL. `ai.dentnode.com` has no DNS record — the service is only
+  reachable at `laby-agent-vgeoqhluoa-em.a.run.app`.
+- The `AUDIO_TO_TEXT_MODEL` comments in `.env.example` and `agent/config.py`
+  described the old Chat-Completions `input_audio` contract and are corrected.
+  They now state what the swap actually requires: a transcription model
+  returning `verbose_json` segments, with diarization as the reason for this
+  particular one.
+
+**Environment — required for the rollout**
+
+- `AUDIO_TO_TEXT_MODEL=microsoft/mai-transcribe-2` in the workflow's `ENV_VARS`.
+  Leaving the old value deployed would keep the endpoint on a chat model while
+  the code calls the transcription endpoint — a straight failure, not a
+  degradation.
+- No new variable and no new secret. Nothing else in the deployed env changes.
+
 ## [Unreleased] — Text-to-Speech endpoint
 
 **Added**

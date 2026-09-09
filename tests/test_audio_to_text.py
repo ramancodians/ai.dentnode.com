@@ -134,6 +134,7 @@ def stubbed_audio(client, monkeypatch):
             latency_ms=1,
             audio_format="wav",
             audio_bytes=1,
+            segments=[{"start": 0.0, "end": 1.0, "text": "hello", "speaker": 0}],
         )
 
     monkeypatch.setattr(server, "fetch_audio", _fake_fetch)
@@ -169,6 +170,7 @@ def test_audio_to_text_accepts_app_key(stubbed_audio):
     assert body["success"] is True
     assert body["transcript"] == "hello"
     assert body["summary"] == "short"
+    assert body["segments"] == [{"start": 0.0, "end": 1.0, "text": "hello", "speaker": 0}]
 
 
 def test_audio_to_text_accepts_d10_key(stubbed_audio):

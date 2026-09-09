@@ -116,7 +116,7 @@ jobs:
           ENV_VARS="${ENV_VARS}@SCAN_REVIEW_ALLOWED_HOSTS=storage.googleapis.com"
           ENV_VARS="${ENV_VARS}@SCAN_REVIEW_ALLOW_INSECURE_FETCH=false"
           # Audio-to-Text (shared by app.dentnode.com and d10.live).
-          ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_MODEL=openai/gpt-audio-mini"
+          ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_MODEL=microsoft/mai-transcribe-2"
           ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_TIMEOUT_SECS=120"
           ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_MAX_BYTES=26214400"
           ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_FETCH_TIMEOUT_SECS=30"

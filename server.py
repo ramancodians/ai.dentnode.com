@@ -436,6 +436,7 @@ async def audio_to_text(
             meta={
                 "audio_bytes": result.audio_bytes,
                 "audio_format": result.audio_format,
+                "speaker_segments": len(result.segments),
             },
         )
     )
@@ -447,6 +448,7 @@ async def audio_to_text(
         "model": result.model,
         "audio_format": result.audio_format,
         "audio_bytes": result.audio_bytes,
+        "segments": result.segments,
     }
 
 

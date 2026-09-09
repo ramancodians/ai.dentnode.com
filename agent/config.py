@@ -114,11 +114,13 @@ class Settings:
 
     # Audio-to-Text agent: transcribe a Digital Ocean audio URL and summarise
     # it. A single-call feature agent (no ADK tool loop) shared by both
-    # app.dentnode.com and d10.live. The audio model must accept multimodal
-    # `input_audio` content parts — the OpenRouter catalog currently exposes
-    # `openai/gpt-audio` / `openai/gpt-audio-mini` for this.
+    # app.dentnode.com and d10.live. This goes through OpenRouter's
+    # /audio/transcriptions endpoint, so the model must be a transcription model
+    # returning `verbose_json` segments; `microsoft/mai-transcribe-2` adds Azure
+    # diarization on top, which is what yields per-segment speaker ids. The
+    # optional summary is written by `model` (LABY_MODEL), not by this one.
     audio_to_text_model: str = _openrouter_model(
-        _get("AUDIO_TO_TEXT_MODEL", "openai/gpt-audio-mini")
+        _get("AUDIO_TO_TEXT_MODEL", "microsoft/mai-transcribe-2")
     )
     audio_to_text_timeout_secs: int = _int("AUDIO_TO_TEXT_TIMEOUT_SECS", 120)
     audio_to_text_max_bytes: int = _int("AUDIO_TO_TEXT_MAX_BYTES", 25 * 1024 * 1024)

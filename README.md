@@ -49,7 +49,7 @@ Node's `AiUsageEvent` ledger via `POST /api/internal/ai-usage`.
 | `POST /scan-review` | Oral Scanner AI Review over arch renders | `LABY_VISION_MODEL` |
 | `POST /rejected-cases-report` | Rejected-cases ops report (Node cron) | `LABY_VISION_MODEL` |
 | `POST /product-update-email` | Weekly product-update marketing copy (Node cron) | `LABY_MODEL` |
-| `POST /audio-to-text` | **Audio-to-Text** — transcribe + summarise a Digital Ocean audio URL (shared by app.dentnode.com + d10.live) | `AUDIO_TO_TEXT_MODEL` |
+| `POST /audio-to-text` | **Audio-to-Text** — transcribe (with speaker diarization) + summarise a Digital Ocean audio URL (shared by app.dentnode.com + d10.live) | `AUDIO_TO_TEXT_MODEL` |
 | `POST /text-to-speech` | **Text-to-Speech** — synthesise speech and stream the audio bytes back (open to every trusted internal caller) | `TEXT_TO_SPEECH_MODEL` |
 | `GET /text-to-speech/voices` | Voices, formats and limits the TTS endpoint accepts | — |
 | `POST /scan-review/analyze` | **Scan Review** — mesh QA from raw STL URLs (standalone module, not Laby) | `SCAN_REVIEW_MODEL` |
@@ -86,6 +86,35 @@ is impossible by construction. There is no raw text-to-SQL.
 | `inactive_clients` | "Which clients are not sending me cases?" |
 | `product_sales` | "Which products are selling more?" |
 | `staff_activity` | "Which staff are not logging in properly?" |
+
+## Audio-to-Text
+
+`agent/audio_to_text.py`. A Digital Ocean audio URL in, a transcript out. This
+goes through OpenRouter's `POST /audio/transcriptions` endpoint — a transcription
+model, not a chat model with an `input_audio` part — so `AUDIO_TO_TEXT_MODEL`
+must be a transcription model. The default, `microsoft/mai-transcribe-2`, also
+exposes Azure diarization, which is what fills in `segments[]`.
+
+```json
+{
+  "transcript": "...",
+  "summary": "...",
+  "segments": [{ "start": 0.0, "end": 4.2, "text": "...", "speaker": 0 }]
+}
+```
+
+**`speaker` is recording-local.** Speaker `0` in one recording is not the same
+person as speaker `0` in another. It separates voices within a single file and
+nothing more — there is no cross-recording voice identity here, so do not store
+it as one or join on it.
+
+`summary: true` costs a **second** provider call: the transcription endpoint
+returns a transcript only, so the summary is written separately by `LABY_MODEL`.
+
+The URL is caller-supplied, which makes `AUDIO_TO_TEXT_ALLOWED_HOSTS` an SSRF
+control rather than a preference — it is pinned in the deploy workflow for that
+reason, and `AUDIO_TO_TEXT_ALLOW_INSECURE_FETCH` must stay `false` anywhere
+deployed.
 
 ## Text-to-Speech
 
