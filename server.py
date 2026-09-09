@@ -9,6 +9,7 @@ shared x-internal-key or x-internal-id. It is deployed to Cloud Run with --ingre
 """
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -17,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent.audio_fetch import AudioFetchError, fetch_audio
@@ -35,6 +36,14 @@ from agent.rejected_cases import (
 )
 from agent.rx_review import generate_rx_review
 from agent.runner import run_turn
+from agent.text_to_speech import (
+    SUPPORTED_FORMATS,
+    SUPPORTED_VOICES,
+    SpeechMeta,
+    SpeechStream,
+    media_type_for,
+    validate_request as validate_speech_request,
+)
 from agent.browser_runner import run_browser_turn
 from agent.scan_review import generate_scan_review
 from agent.usage import report_usage
@@ -201,6 +210,28 @@ class AudioToTextRequest(BaseModel):
 
     audio_url: str = Field(..., min_length=1, max_length=2048)
     summary: bool = True
+    lab_id: Optional[str] = None
+    user_id: Optional[str] = None
+
+
+class TextToSpeechRequest(BaseModel):
+    """Open to every trusted internal caller (app.dentnode.com, d10.live, …).
+
+    The upper bound on `text` is enforced against TEXT_TO_SPEECH_MAX_CHARS in
+    the handler; the field cap here is only a cheap guard against a caller
+    posting a megabyte of prose.
+    """
+
+    text: str = Field(..., min_length=1, max_length=100_000)
+    # Falls back to TEXT_TO_SPEECH_VOICE when the caller does not care.
+    voice: Optional[str] = None
+    audio_format: str = "wav"
+    # Streaming is the default: the first bytes leave here well under a second
+    # after the request, so a caller can start playback while the rest arrives.
+    # Set false to get one buffered file with a Content-Length and an
+    # exact-size WAV header, which is what a caller that is about to upload the
+    # result somewhere actually wants.
+    stream: bool = True
     lab_id: Optional[str] = None
     user_id: Optional[str] = None
 
@@ -405,6 +436,7 @@ async def audio_to_text(
             meta={
                 "audio_bytes": result.audio_bytes,
                 "audio_format": result.audio_format,
+                "speaker_segments": len(result.segments),
             },
         )
     )
@@ -416,6 +448,189 @@ async def audio_to_text(
         "model": result.model,
         "audio_format": result.audio_format,
         "audio_bytes": result.audio_bytes,
+        "segments": result.segments,
+    }
+
+
+# Keeps X-TTS-Transcript-B64 inside a typical 8 KB per-header proxy limit even
+# when every character is multi-byte.
+_TRANSCRIPT_HEADER_MAX_CHARS = 1024
+
+
+def _speech_headers(meta: SpeechMeta, *, streaming: bool) -> Dict[str, str]:
+    """Metadata sidecar for a binary body.
+
+    The response body is audio, so everything a caller might want to log,
+    display or bill against has to ride in headers. They are ASCII-safe by
+    construction except the transcript, which is base64 so a non-Latin-1 script
+    (Hindi, say) cannot make the response unencodable.
+    """
+    headers = {
+        "X-TTS-Model": meta.model,
+        "X-TTS-Voice": meta.voice,
+        "X-TTS-Format": meta.audio_format,
+        "X-TTS-Sample-Rate": str(meta.sample_rate),
+        "X-TTS-Channels": str(meta.channels),
+        "Content-Disposition": f'attachment; filename="speech.{meta.audio_format}"',
+        "Cache-Control": "no-store",
+    }
+    if streaming:
+        # Nothing below is known until the stream drains, so a streaming
+        # response cannot carry it — the caller gets it from the ledger.
+        #
+        # The flag is worth stating because a chunked WAV is not byte-identical
+        # to a buffered one: its two RIFF size fields hold the streaming
+        # sentinel, since the length is unknown when the header goes out.
+        # ffprobe, browsers and ffmpeg all read such a file correctly, but
+        # anything that trusts the size field verbatim (Python's `wave`, some
+        # metadata scrapers) will report a nonsense duration. A caller that
+        # needs exact metadata on the file itself should send stream=false.
+        headers["X-TTS-Streaming"] = "chunked"
+        headers["X-Accel-Buffering"] = "no"
+        return headers
+    headers.update({
+        "X-TTS-Audio-Ms": str(meta.duration_ms),
+        "X-TTS-Latency-Ms": str(meta.latency_ms),
+        "X-TTS-Cost-Usd": f"{meta.cost_usd:.8f}" if meta.cost_usd is not None else "",
+        # What the model actually said. Compare it against the text you sent to
+        # detect the one real failure mode of using a chat model as a TTS
+        # engine: it answering the text instead of reading it.
+    })
+    # Header budget: 4000 characters of Devanagari is ~12 KB of UTF-8 and ~16 KB
+    # of base64, past what most proxies accept in a single header. Truncating
+    # the source keeps the response deliverable; a deviation shows up at the
+    # start of the transcript anyway, which is what this header is for.
+    transcript = meta.transcript
+    truncated = len(transcript) > _TRANSCRIPT_HEADER_MAX_CHARS
+    if truncated:
+        transcript = transcript[:_TRANSCRIPT_HEADER_MAX_CHARS]
+        headers["X-TTS-Transcript-Truncated"] = "true"
+    headers["X-TTS-Transcript-B64"] = base64.b64encode(
+        transcript.encode("utf-8")
+    ).decode("ascii")
+    return headers
+
+
+@app.post("/text-to-speech")
+async def text_to_speech(
+    body: TextToSpeechRequest,
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_internal_id: Optional[str] = Header(default=None, alias="x-internal-id"),
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+):
+    """Synthesise speech from text and return the audio bytes.
+
+    Open to any trusted internal caller — app.dentnode.com (x-internal-key) or
+    d10.live (x-d10-internal-key) — like /audio-to-text.
+
+    Nothing is stored here. The audio is streamed straight back to the caller,
+    which owns the decision of whether it lands in Spaces, goes out over
+    WhatsApp, or is played once and dropped.
+    """
+    _require_shared_internal_key(x_internal_key or x_internal_id, x_d10_internal_key)
+
+    voice = body.voice or settings.text_to_speech_voice
+    try:
+        text = validate_speech_request(
+            text=body.text, voice=voice, audio_format=body.audio_format
+        )
+    except ValueError as exc:
+        # Covers UnsupportedVoice/UnsupportedFormat too — both subclass ValueError.
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    lab_id = body.lab_id or PLATFORM_LAB_ID
+
+    def meter(meta: SpeechMeta) -> None:
+        _fire_and_forget(
+            report_usage(
+                feature="text_to_speech",
+                lab_id=lab_id,
+                user_id=body.user_id,
+                model=meta.model,
+                usage=meta.usage,
+                cost=meta.cost_usd,
+                cost_source=meta.cost_source,
+                latency_ms=meta.latency_ms,
+                status=meta.status,
+                meta=meta.as_usage_meta(),
+            )
+        )
+
+    # open() blocks until the first audio frame arrives, so an upstream failure
+    # becomes a clean 502 here rather than a truncated file the caller has
+    # already started saving.
+    try:
+        speech = await SpeechStream(
+            text=text, voice=voice, audio_format=body.audio_format
+        ).open()
+    except OpenRouterError as exc:
+        logger.error(
+            "Text-to-speech generation failed",
+            extra={"lab_id": lab_id, "error": str(exc)},
+        )
+        _fire_and_forget(
+            report_usage(
+                feature="text_to_speech",
+                lab_id=lab_id,
+                user_id=body.user_id,
+                model=settings.text_to_speech_model,
+                status="error",
+                meta={"voice": voice, "chars": len(text)},
+            )
+        )
+        raise HTTPException(status_code=502, detail="Text-to-speech model call failed")
+
+    if not body.stream:
+        audio = await speech.collect()
+        meter(speech.meta)
+        if speech.meta.status != "ok":
+            # Nothing has been sent yet on this path, so a mid-stream failure
+            # can still surface as an error instead of a silently truncated
+            # file. Returning the partial audio as a 200 would defeat the only
+            # reason a caller asks for the buffered mode.
+            logger.error(
+                "Text-to-speech stream ended early",
+                extra={"lab_id": lab_id, "audio_bytes": speech.meta.audio_bytes},
+            )
+            raise HTTPException(
+                status_code=502, detail="Text-to-speech stream ended early"
+            )
+        return Response(
+            content=audio,
+            media_type=media_type_for(speech.meta.audio_format),
+            headers=_speech_headers(speech.meta, streaming=False),
+        )
+
+    async def audio_stream():
+        try:
+            async for chunk in speech.chunks():
+                yield chunk
+        finally:
+            # Runs on a client disconnect as well as on a clean finish, so the
+            # spend OpenRouter has already charged for is never lost.
+            meter(speech.meta)
+
+    return StreamingResponse(
+        audio_stream(),
+        media_type=media_type_for(speech.meta.audio_format),
+        headers=_speech_headers(speech.meta, streaming=True),
+    )
+
+
+@app.get("/text-to-speech/voices")
+async def text_to_speech_voices(
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_internal_id: Optional[str] = Header(default=None, alias="x-internal-id"),
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, Any]:
+    """What a caller may put in `voice` / `audio_format`, and the current default."""
+    _require_shared_internal_key(x_internal_key or x_internal_id, x_d10_internal_key)
+    return {
+        "voices": list(SUPPORTED_VOICES),
+        "formats": list(SUPPORTED_FORMATS),
+        "default_voice": settings.text_to_speech_voice,
+        "model": settings.text_to_speech_model,
+        "max_chars": settings.text_to_speech_max_chars,
     }
 
 

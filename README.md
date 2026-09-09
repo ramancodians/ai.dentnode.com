@@ -49,7 +49,9 @@ Node's `AiUsageEvent` ledger via `POST /api/internal/ai-usage`.
 | `POST /scan-review` | Oral Scanner AI Review over arch renders | `LABY_VISION_MODEL` |
 | `POST /rejected-cases-report` | Rejected-cases ops report (Node cron) | `LABY_VISION_MODEL` |
 | `POST /product-update-email` | Weekly product-update marketing copy (Node cron) | `LABY_MODEL` |
-| `POST /audio-to-text` | **Audio-to-Text** — transcribe + summarise a Digital Ocean audio URL (shared by app.dentnode.com + d10.live) | `AUDIO_TO_TEXT_MODEL` |
+| `POST /audio-to-text` | **Audio-to-Text** — transcribe (with speaker diarization) + summarise a Digital Ocean audio URL (shared by app.dentnode.com + d10.live) | `AUDIO_TO_TEXT_MODEL` |
+| `POST /text-to-speech` | **Text-to-Speech** — synthesise speech and stream the audio bytes back (open to every trusted internal caller) | `TEXT_TO_SPEECH_MODEL` |
+| `GET /text-to-speech/voices` | Voices, formats and limits the TTS endpoint accepts | — |
 | `POST /scan-review/analyze` | **Scan Review** — mesh QA from raw STL URLs (standalone module, not Laby) | `SCAN_REVIEW_MODEL` |
 | `GET /scan-review/health` | Scan Review config/readiness (no auth) | — |
 | `GET /health` | Liveness/readiness (no auth) | — |
@@ -84,6 +86,90 @@ is impossible by construction. There is no raw text-to-SQL.
 | `inactive_clients` | "Which clients are not sending me cases?" |
 | `product_sales` | "Which products are selling more?" |
 | `staff_activity` | "Which staff are not logging in properly?" |
+
+## Audio-to-Text
+
+`agent/audio_to_text.py`. A Digital Ocean audio URL in, a transcript out. This
+goes through OpenRouter's `POST /audio/transcriptions` endpoint — a transcription
+model, not a chat model with an `input_audio` part — so `AUDIO_TO_TEXT_MODEL`
+must be a transcription model. The default, `microsoft/mai-transcribe-2`, also
+exposes Azure diarization, which is what fills in `segments[]`.
+
+```json
+{
+  "transcript": "...",
+  "summary": "...",
+  "segments": [{ "start": 0.0, "end": 4.2, "text": "...", "speaker": 0 }]
+}
+```
+
+**`speaker` is recording-local.** Speaker `0` in one recording is not the same
+person as speaker `0` in another. It separates voices within a single file and
+nothing more — there is no cross-recording voice identity here, so do not store
+it as one or join on it.
+
+`summary: true` costs a **second** provider call: the transcription endpoint
+returns a transcript only, so the summary is written separately by `LABY_MODEL`.
+
+The URL is caller-supplied, which makes `AUDIO_TO_TEXT_ALLOWED_HOSTS` an SSRF
+control rather than a preference — it is pinned in the deploy workflow for that
+reason, and `AUDIO_TO_TEXT_ALLOW_INSECURE_FETCH` must stay `false` anywhere
+deployed.
+
+## Text-to-Speech
+
+`agent/text_to_speech.py`. Text in, audio bytes out. A single-call feature agent
+open to every trusted internal caller — `app.dentnode.com` via `x-internal-key`,
+`d10.live` via `x-d10-internal-key`, like `/audio-to-text`.
+
+**It stores nothing.** The audio is streamed straight back; whether it lands in
+Spaces, goes out over WhatsApp, or is played once and dropped is the calling
+application's decision, because only that application knows the retention rules
+for what was said.
+
+```bash
+curl -sS -X POST https://<host>/text-to-speech \
+  -H "x-internal-key: $INTERNAL_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"text":"Your crown case is ready for pickup.","voice":"alloy"}' \
+  -o speech.wav
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `text` | — | Required. Capped by `TEXT_TO_SPEECH_MAX_CHARS` (4000). |
+| `voice` | `TEXT_TO_SPEECH_VOICE` | See `GET /text-to-speech/voices`. |
+| `audio_format` | `wav` | `wav` or `pcm` (raw 24 kHz mono 16-bit LE frames). |
+| `stream` | `true` | `false` buffers one file with a `Content-Length`. |
+| `lab_id` / `user_id` | `__platform__` | Attribution on the `AiUsageEvent` row. |
+
+The body is binary, so metadata rides in `X-TTS-*` headers. Buffered responses
+add `X-TTS-Audio-Ms`, `X-TTS-Cost-Usd` and `X-TTS-Transcript-B64` (base64 so a
+non-Latin-1 script cannot break the header); streaming responses cannot, because
+none of it is known until the stream drains — read it from the ledger instead.
+
+### Two things about this endpoint are not obvious
+
+**There is no free TTS on OpenRouter, and only one sane-priced option.** Of 430
+models in the catalog exactly four emit audio: two Lyria models (music, not
+speech) and `openai/gpt-audio` / `openai/gpt-audio-mini`. The mini variant is
+26.7x cheaper per audio output token ($0.0000024 vs $0.000064), which measures
+out at **~$0.0043 per minute of speech** (₹0.37/min) — a 6.4-second
+notification costs $0.00044. `TEXT_TO_SPEECH_MODEL` is therefore a spend knob,
+and `TEXT_TO_SPEECH_MAX_CHARS` is the per-call cap.
+
+**MP3 is unreachable, so we emit WAV.** OpenRouter rejects audio output without
+`stream: true`, and rejects every container but `pcm16` once streaming. We
+receive raw PCM and write the 44-byte RIFF header ourselves — no encoder, no
+ffmpeg, nothing added to a 512Mi image. A streaming WAV carries the streaming
+sentinel in its two size fields (the length is unknown when the header goes
+out); ffmpeg, ffprobe and browsers all read such a file correctly, but anything
+that trusts the size field verbatim will report a nonsense duration. Send
+`stream: false` when the file's own metadata has to be exact.
+
+Note also that `gpt-audio-mini` is a chat model, not a TTS engine: a system
+prompt clamps it to reading rather than answering, and it is the injection
+boundary, since the text being spoken is caller data. `X-TTS-Transcript-B64`
+reports what the model actually said, so a caller can verify it verbatim.
 
 ## Scan Review (standalone module)
 

@@ -6,6 +6,121 @@ Newest first. Each entry records what changed, plus anything that must be true i
 the environment for it to run — this service is deployed to Cloud Run by CI, so
 missing env vars and Secret Manager entries are the usual cause of a failed rollout.
 
+## [Unreleased] — Speaker diarization on /audio-to-text, and full env parity
+
+**Changed — /audio-to-text now uses a transcription model, not a chat model**
+
+- `agent/audio_to_text.py` calls OpenRouter's `POST /audio/transcriptions`
+  endpoint directly instead of routing an `input_audio` content part through
+  Chat Completions. Still OpenRouter-only: same single `OPENROUTER_API_KEY`, no
+  provider SDK, no direct-to-provider request.
+- `AUDIO_TO_TEXT_MODEL` moves from `openai/gpt-audio-mini` to
+  `microsoft/mai-transcribe-2`, which exposes Azure's diarization through
+  OpenRouter. The request asks for `verbose_json` with segment and word
+  timestamps and `provider.options.azure.diarization.enabled`.
+- The response gains a `segments[]` array — start, end, text and a
+  **recording-local** speaker id per segment. Recording-local means speaker `0`
+  in one recording is not the same person as speaker `0` in another; there is no
+  cross-recording voice identity here, and callers must not treat it as one. The
+  usage event carries the segment count as `meta.speaker_segments`.
+- The optional summary is now a second, separate call written by `LABY_MODEL` —
+  the transcription endpoint returns a transcript only, so the previous
+  one-call "transcript + summary in one completion" split is gone. A summarised
+  request therefore books two provider calls, not one.
+
+**Changed — every env surface now carries every variable**
+
+- `.env`, `.env.production` and the deploy workflow's `ENV_VARS` were each
+  missing variables that `agent/config.py` and `scan_review/config.py` actually
+  read — 25 in `.env`, 24 in `.env.production`. All four surfaces (`.env`,
+  `.env.production`, `.env.example`, workflow) now agree, verified by diffing
+  the parsed key sets against the names read in code.
+- The three deliberate exclusions stay: `PORT` is injected by Cloud Run and
+  rejected by `--set-env-vars`; `LABY_AGENT_URL` and `REDIS_URL` are
+  cross-service parity entries this Python service never reads.
+- Environment-specific values are the only differences left between
+  `.env.example` and `.env.production`: `NODE_INTERNAL_BASE_URL`,
+  `D10_INTERNAL_BASE_URL`, `D10_USAGE_OUTBOX_PATH` (`/tmp`, the only path the
+  non-root `laby` user can write), `SCAN_REVIEW_ALLOWED_HOSTS` (pinned to
+  `storage.googleapis.com` in production, open locally) and `LABY_AGENT_URL`.
+- `.env.production`'s `LABY_AGENT_URL` placeholder replaced with the real
+  service URL. `ai.dentnode.com` has no DNS record — the service is only
+  reachable at `laby-agent-vgeoqhluoa-em.a.run.app`.
+- The `AUDIO_TO_TEXT_MODEL` comments in `.env.example` and `agent/config.py`
+  described the old Chat-Completions `input_audio` contract and are corrected.
+  They now state what the swap actually requires: a transcription model
+  returning `verbose_json` segments, with diarization as the reason for this
+  particular one.
+
+**Environment — required for the rollout**
+
+- `AUDIO_TO_TEXT_MODEL=microsoft/mai-transcribe-2` in the workflow's `ENV_VARS`.
+  Leaving the old value deployed would keep the endpoint on a chat model while
+  the code calls the transcription endpoint — a straight failure, not a
+  degradation.
+- No new variable and no new secret. Nothing else in the deployed env changes.
+
+## [Unreleased] — Text-to-Speech endpoint
+
+**Added**
+
+- `POST /text-to-speech`: synthesises speech from text and streams the audio
+  bytes back. A single-call feature agent — no ADK session, no tool loop — open
+  to every trusted internal caller, `app.dentnode.com` via `x-internal-key` and
+  `d10.live` via `x-d10-internal-key`, the same shared-key pattern as
+  `/audio-to-text`. It **stores nothing**: retention is the calling
+  application's decision. New module `agent/text_to_speech.py`, covered by
+  `tests/test_text_to_speech.py`.
+- `GET /text-to-speech/voices`: the accepted voices, formats, default and
+  character cap, so a caller does not have to hardcode them.
+- Streaming is the default (`stream: true`) — first bytes leave under a second,
+  so a caller can start playback while the rest arrives. `stream: false`
+  returns one buffered file with a `Content-Length`, an exact-size WAV header,
+  and the `X-TTS-Audio-Ms` / `X-TTS-Cost-Usd` / `X-TTS-Transcript-B64` headers
+  that a streaming response cannot carry.
+- Metered into the `AiUsageEvent` ledger as `feature="text_to_speech"`, with
+  OpenRouter's exact cost. Calls without a `lab_id` book to `__platform__`.
+
+**Model choice is a pricing decision**
+
+- There is **no free text-to-speech model on OpenRouter**. Of 430 models in the
+  catalog exactly four emit the `audio` output modality: two Lyria models
+  (music generation, not speech) and `openai/gpt-audio` /
+  `openai/gpt-audio-mini`. `TEXT_TO_SPEECH_MODEL` defaults to the mini variant,
+  which is 26.7x cheaper per audio output token ($0.0000024 vs $0.000064).
+  Measured end to end that is **~$0.0043 per minute of speech**; a 6.4-second
+  notification cost $0.000438. `TEXT_TO_SPEECH_MAX_CHARS` caps a single call's
+  spend, since audio output is billed per second of speech.
+
+**Why the output is WAV and not MP3**
+
+- OpenRouter rejects `modalities: ["text","audio"]` without `stream: true`, and
+  once streaming it rejects every container except `pcm16`. MP3/Opus/AAC are
+  unreachable on this path at any price. The module receives raw 24 kHz mono
+  16-bit PCM and writes the 44-byte RIFF header itself — no encoder, no ffmpeg,
+  no new dependency, nothing added to a 512Mi image. Both constraints are
+  pinned by `test_request_body_pins_the_openrouter_audio_contract`, because
+  they are not stated anywhere in the model catalog and were found by probing.
+- A **streaming** WAV carries `0xFFFFFFFF` in its two RIFF size fields, since
+  the length is unknown when the header goes out. ffmpeg, ffprobe and browsers
+  read such a file correctly (verified: ffprobe reports the true 7.65 s);
+  anything trusting the size field verbatim — Python's `wave`, some metadata
+  scrapers — will report a nonsense duration. Callers needing exact file
+  metadata should send `stream: false`. The streaming response says so via
+  `X-TTS-Streaming: chunked`.
+
+**Environment — required for the rollout**
+
+- `TEXT_TO_SPEECH_MODEL`, `TEXT_TO_SPEECH_VOICE`, `TEXT_TO_SPEECH_TIMEOUT_SECS`
+  and `TEXT_TO_SPEECH_MAX_CHARS` added to `.env.example` **and** to the deploy
+  workflow's `ENV_VARS`. `--set-env-vars` replaces the whole literal-env list,
+  so a variable read by `agent/config.py` but missing there is deleted from the
+  next revision and the code default silently takes over — which for
+  `TEXT_TO_SPEECH_MODEL` would mean silently changing what the platform spends
+  per minute of audio.
+- No new secret. The service still holds exactly one provider credential
+  (`OPENROUTER_API_KEY`); this feature adds no direct-to-provider path.
+
 ## [Unreleased] — Audio-to-Text endpoint
 
 **Added**

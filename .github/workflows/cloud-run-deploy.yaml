@@ -116,13 +116,20 @@ jobs:
           ENV_VARS="${ENV_VARS}@SCAN_REVIEW_ALLOWED_HOSTS=storage.googleapis.com"
           ENV_VARS="${ENV_VARS}@SCAN_REVIEW_ALLOW_INSECURE_FETCH=false"
           # Audio-to-Text (shared by app.dentnode.com and d10.live).
-          ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_MODEL=openai/gpt-audio-mini"
+          ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_MODEL=microsoft/mai-transcribe-2"
           ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_TIMEOUT_SECS=120"
           ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_MAX_BYTES=26214400"
           ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_FETCH_TIMEOUT_SECS=30"
           # SSRF control: the endpoint may only dereference URLs on these hosts.
           ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_ALLOWED_HOSTS=.digitaloceanspaces.com,.cdn.digitaloceanspaces.com"
           ENV_VARS="${ENV_VARS}@AUDIO_TO_TEXT_ALLOW_INSECURE_FETCH=false"
+          # Text-to-Speech (open to every trusted internal caller). The model is
+          # the only one on OpenRouter that emits speech at a sane price — see
+          # .env.example. MAX_CHARS is the spend cap on a single call.
+          ENV_VARS="${ENV_VARS}@TEXT_TO_SPEECH_MODEL=openai/gpt-audio-mini"
+          ENV_VARS="${ENV_VARS}@TEXT_TO_SPEECH_VOICE=alloy"
+          ENV_VARS="${ENV_VARS}@TEXT_TO_SPEECH_TIMEOUT_SECS=120"
+          ENV_VARS="${ENV_VARS}@TEXT_TO_SPEECH_MAX_CHARS=4000"
 
           gcloud run deploy ${{ env.CLOUD_RUN_SERVICE }} \
             --project=${{ env.GCP_PROJECT }} --region=${{ env.GCP_REGION }} \
