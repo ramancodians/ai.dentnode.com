@@ -6,6 +6,80 @@ Newest first. Each entry records what changed, plus anything that must be true i
 the environment for it to run — this service is deployed to Cloud Run by CI, so
 missing env vars and Secret Manager entries are the usual cause of a failed rollout.
 
+## [Unreleased] — Appointment-reminder call copy for D10
+
+**Added**
+
+- `POST /d10/call-copy`: writes the spoken opening of one D10 appointment-reminder
+  phone call, in the patient's own language. A single-call feature agent — no ADK
+  session, no tool loop — reachable with either internal key. New module
+  `agent/call_copy.py`, covered by `tests/test_call_copy.py`.
+- `GET /d10/call-copy/languages`: the languages and model in use, so a caller
+  does not hardcode them. Hindi (`hi`), Marathi (`mr`) and English (`en`) today;
+  adding one is a data-only change (one entry in `_LANGUAGES`).
+- Output is words to be SPOKEN, not a message to be displayed: no digits, no
+  markdown, no emoji. It is meant to feed straight into `/text-to-speech`.
+- Metered as `feature="d10_call_copy"`, with `meta.repaired` recording whether
+  the corrective turn was needed.
+
+**The date is rendered in code, never by the model — this is the whole design**
+
+- Every model tried got the date wrong when asked to spell it out. `gemma-3-4b`
+  produced `दो हज़ार छشرين` — Arabic script inside a Devanagari year — and moved
+  the year to 2027 in Marathi. `gpt-oss-20b` rendered 2026 as `दो हजार साठ और छह`
+  ("two thousand sixty and six") and translated "root canal" literally as
+  `मूल जड़ कैनाल`. A reminder naming the wrong day is worse than no reminder: the
+  patient misses the slot and blames the clinic.
+- So `render_when()` renders date and time deterministically from per-language
+  tables and hands the model a finished phrase to copy verbatim. Across seven
+  models this took date accuracy from **0/12 to 10/12** before validation runs.
+  `generate_call_copy` then verifies the phrase survived and that no digit
+  reached the output, spends one corrective turn if not, and **raises rather
+  than return copy that still names the wrong time**.
+- Numerals 1-59 are a table, not an algorithm: Hindi and Marathi numbers are
+  irregular to 99 and are not composable from digits. Idiomatic clock forms are
+  covered — `साडेचार`, `सव्वा चार`, `पौने पाँच`, and the one-off `डेढ़`/`ढाई`
+  and `दीड`/`अडीच` for 1:30 and 2:30 — because that is what a receptionist says.
+- A test sweeps all 24x60 times in every language asserting no digit can escape.
+
+**Model is hardcoded in `agent/call_copy.py`, deliberately not an env var**
+
+- `CALL_COPY_MODEL = "google/gemma-4-26b-a4b-it"`. Not a secret, not
+  environment-specific: the same model must write the same copy in dev and prod,
+  or the thing we reviewed is not the thing that calls the patient. Hardcoding
+  also keeps it reviewable in a diff, which a value set in a deploy workflow is
+  not. **Nothing was added to `.env`, `.env.production` or the workflow.**
+- Chosen by running the real task across seven candidates: it was the only one
+  producing clean, natural, fully-native output in both Hindi and Marathi.
+  `llama-3.3-70b` truncated Marathi at 8 words; `mistral-small` produced
+  semantically broken Marathi ("I am the opportunity of the clinic");
+  `mistral-nemo` romanised Hindi to Hinglish and answered Marathi in English.
+
+**No free model can serve this, checked rather than assumed**
+
+- Of 431 models in the live catalog, 21 are zero-cost, and every one that could
+  serve this task failed. `google/gemma-4-31b-it:free` and
+  `gemma-4-26b-a4b-it:free` returned 429 "temporarily rate-limited upstream" on
+  every attempt across several runs. `nvidia/nemotron-3.5-lightning:free` is a
+  reasoning model that spent its whole budget narrating a thinking process and
+  never reached an answer. `thinkingmachines/inkling-small:free` returns 403
+  (agentic harnesses only). A reminder that fails because a free tier is busy is
+  a patient who does not get reminded — so this path pays, and pays very little:
+  **~$0.000047 per call, about ₹0.004, or ₹40 for ten thousand calls.**
+
+**Known gaps**
+
+- Proper nouns and clinical terms come back in Latin script inside Devanagari
+  ("Smile Care Dental", "root canal follow-up"). Natural for a bilingual reader
+  and normal Indian code-switching, but a TTS engine reading Devanagari may
+  mispronounce or switch voice mid-sentence. Decide per TTS engine before this
+  carries live calls.
+- The Marathi numerals in the 32-59 range want a native-speaker pass. They are
+  the least common in appointment slots and the least verifiable from here;
+  everything below 32 and all the idiomatic clock forms are well-trodden.
+- Not deployed. Endpoint is exercised locally end to end (auth, both keys,
+  validation, live model) and the full suite passes at 342.
+
 ## [Unreleased] — Speaker diarization on /audio-to-text, and full env parity
 
 **Changed — /audio-to-text now uses a transcription model, not a chat model**

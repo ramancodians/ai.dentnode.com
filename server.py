@@ -23,6 +23,14 @@ from pydantic import BaseModel, Field
 
 from agent.audio_fetch import AudioFetchError, fetch_audio
 from agent.audio_to_text import UnsupportedAudioFormat, transcribe_audio
+from agent.call_copy import (
+    CALL_COPY_MODEL,
+    SUPPORTED_LANGUAGES,
+    CallCopyError,
+    UnsupportedAppointmentTime,
+    UnsupportedLanguage,
+    generate_call_copy,
+)
 from agent.case_from_image import CaseExtractionError, extract_case_from_image
 from agent.config import settings
 from agent.insights import generate_insights
@@ -214,6 +222,31 @@ class AudioToTextRequest(BaseModel):
     user_id: Optional[str] = None
 
 
+class CallCopyRequest(BaseModel):
+    """Copy for one D10 appointment-reminder call, in the patient's language.
+
+    `appointment_at` is ISO-8601. A naive value is read as already local to
+    `timezone`; an aware one is converted into it. The date and time are
+    rendered to words in code, never by the model — see agent/call_copy.py.
+    """
+
+    language: str = Field(..., min_length=2, max_length=8)
+    appointment_at: str = Field(..., min_length=4, max_length=64)
+    patient_name: str = Field(..., min_length=1, max_length=120)
+    clinic_name: str = Field(..., min_length=1, max_length=120)
+    timezone: str = "Asia/Kolkata"
+    doctor_name: Optional[str] = Field(default=None, max_length=120)
+    reason: Optional[str] = Field(default=None, max_length=120)
+    caller_name: Optional[str] = Field(default=None, max_length=120)
+    # Hindi and Marathi inflect verbs and honorifics for gender; without these
+    # the model guesses, and it guesses inconsistently.
+    patient_gender: Optional[str] = Field(default=None, max_length=16)
+    caller_gender: Optional[str] = Field(default=None, max_length=16)
+    notes: Optional[str] = Field(default=None, max_length=120)
+    lab_id: Optional[str] = None
+    user_id: Optional[str] = None
+
+
 class TextToSpeechRequest(BaseModel):
     """Open to every trusted internal caller (app.dentnode.com, d10.live, …).
 
@@ -344,6 +377,89 @@ async def agent_run(
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache, no-transform"},
     )
+
+
+@app.get("/d10/call-copy/languages")
+async def call_copy_languages(
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, Any]:
+    """The languages this agent can write, so a caller need not hardcode them."""
+    _require_shared_internal_key(x_internal_key, x_d10_internal_key)
+    return {"languages": list(SUPPORTED_LANGUAGES), "model": CALL_COPY_MODEL}
+
+
+@app.post("/d10/call-copy")
+async def d10_call_copy(
+    body: CallCopyRequest,
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, Any]:
+    """Write the spoken opening of one appointment-reminder call.
+
+    Returns words to be SPOKEN, not a message to be displayed: no digits, no
+    markdown, no emoji. Feed `text` straight to /text-to-speech or read it at
+    the front desk. `spoken_when` is returned alongside so the caller can see
+    exactly which date phrase was pinned into the copy.
+    """
+    _require_shared_internal_key(x_internal_key, x_d10_internal_key)
+    lab_id = body.lab_id or PLATFORM_LAB_ID
+
+    try:
+        copy = await generate_call_copy(
+            language=body.language,
+            appointment_at=body.appointment_at,
+            timezone=body.timezone,
+            patient_name=body.patient_name,
+            clinic_name=body.clinic_name,
+            doctor_name=body.doctor_name or "",
+            reason=body.reason or "",
+            caller_name=body.caller_name or "",
+            patient_gender=body.patient_gender or "",
+            caller_gender=body.caller_gender or "",
+            notes=body.notes or "",
+        )
+    except (UnsupportedLanguage, UnsupportedAppointmentTime, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except (OpenRouterError, CallCopyError) as exc:
+        logger.error(
+            "Call copy generation failed",
+            extra={"lab_id": lab_id, "language": body.language, "error": str(exc)},
+        )
+        _fire_and_forget(
+            report_usage(
+                feature="d10_call_copy",
+                lab_id=lab_id,
+                user_id=body.user_id,
+                model=CALL_COPY_MODEL,
+                status="error",
+            )
+        )
+        raise HTTPException(status_code=502, detail="Call copy model call failed")
+
+    _fire_and_forget(
+        report_usage(
+            feature="d10_call_copy",
+            lab_id=lab_id,
+            user_id=body.user_id,
+            model=copy.model,
+            usage=copy.usage,
+            cost=copy.cost_usd,
+            cost_source="openrouter" if copy.cost_usd is not None else "estimated",
+            latency_ms=copy.latency_ms,
+            status="ok",
+            meta={"language": copy.language, "repaired": copy.repaired},
+        )
+    )
+
+    return {
+        "success": True,
+        "text": copy.text,
+        "language": copy.language,
+        "spoken_when": copy.spoken_when,
+        "model": copy.model,
+        "repaired": copy.repaired,
+    }
 
 
 @app.post("/d10/agent/run")
