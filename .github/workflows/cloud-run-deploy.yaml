@@ -1,8 +1,8 @@
-name: Deploy Laby Agent to Cloud Run
+name: Legacy manual deployment to Cloud Run
 
 on:
-  push:
-    branches: [main]
+  # Kept only as a temporary rollback option during the GCP retirement. The
+  # production path is deploy-vps.yaml and Cloud Run must never gate it.
   workflow_dispatch:
 
 concurrency:

@@ -5,6 +5,14 @@ This directory is the reviewed source template for the root-owned deployment at
 files or execute arbitrary shell commands. It sends one immutable GHCR digest to
 the VPS service-scoped dispatcher.
 
+`deploy-vps.yaml` is the only automatic production deployment: every push to
+`main` runs the full test suite, builds the exact tested commit, publishes it to
+GHCR by immutable digest, and sends that digest to the restricted dispatcher.
+Pull requests run the same test suite in `ci.yaml` without registry, VPS, or GCP
+credentials.
+The old Cloud Run workflow is manual-only and is not a prerequisite or fallback
+inside the VPS workflow. This repository has no staging deployment path.
+
 ## Server prerequisites
 
 - Create `/var/lib/dentnode/ai-outbox` as `10001:10001` with mode `0700`.
@@ -62,8 +70,22 @@ Initially set the Node application's `LABY_AGENT_URL` to
 changes at promotion. A stable private routing alias can replace the HTTPS URL
 later without changing this service.
 
-## Telemetry limitation
+## Application tracing
 
-JSON container logs and Docker resource metrics are collected by the host
-telemetry stack. This repository does not yet include OpenTelemetry SDK
-instrumentation, so distributed traces require a separate code change.
+The service exports sampled traces to the host OpenTelemetry collector at
+`http://dentnode-telemetry-agent:4318/v1/traces` over the private
+`dentnode-telemetry` Docker network. No OTLP port is published on the VPS.
+Before deploying this revision, the collector must expose an OTLP/HTTP receiver
+on `0.0.0.0:4318` and include that receiver in its traces pipeline to SigNoz.
+
+`OTEL_TRACES_SAMPLER_ARG` controls root-trace head sampling and defaults to `0.10`;
+upstream parent decisions are honored. The immutable image digest is exported
+as `service.version`, so SigNoz can separate releases.
+
+Telemetry has an exporter-boundary privacy allowlist. Inbound FastAPI spans
+contain method, registered route template, response status, protocol and
+duration. Outbound HTTPX spans contain method, destination hostname/port,
+response status and duration. Request/response bodies, headers, query strings,
+concrete route parameters, client addresses, exception messages/events,
+baggage, arbitrary attributes and secrets are never exported. Do not replace
+this with broad OpenTelemetry auto-instrumentation.

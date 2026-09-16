@@ -1,12 +1,9 @@
 name: Deploy Laby Agent to DentNode VPS
 
 on:
-  # The existing Cloud Run workflow runs this repository's full test suite.
-  # Reusing its successful main-branch SHA gives this deployment provenance
-  # while Cloud Run remains available during the VPS migration.
-  workflow_run:
-    workflows: ["Deploy Laby Agent to Cloud Run"]
-    types: [completed]
+  # Production deploys are owned by this workflow. It verifies the exact main
+  # commit itself, so VPS availability never depends on the legacy GCP path.
+  push:
     branches: [main]
   workflow_dispatch:
 
@@ -23,9 +20,6 @@ env:
 
 jobs:
   build-and-deploy:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: production
@@ -35,7 +29,7 @@ jobs:
         id: commit
         shell: bash
         env:
-          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          CANDIDATE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -51,8 +45,8 @@ jobs:
           ref: ${{ steps.commit.outputs.sha }}
           persist-credentials: false
 
-      # A manual dispatch does not inherit another workflow's test provenance.
-      # Running tests unconditionally also protects against workflow drift.
+      # Tests run unconditionally against the exact commit that will be built.
+      # This keeps push and manual production deployments equally gated.
       # actions/setup-python v5.6.0
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065

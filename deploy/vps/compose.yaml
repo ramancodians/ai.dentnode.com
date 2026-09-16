@@ -14,6 +14,11 @@ services:
     environment:
       PORT: "8080"
       D10_USAGE_OUTBOX_PATH: /var/lib/dentnode-ai/d10-usage-outbox.sqlite3
+      # Private OTLP/HTTP only. The collector is reachable on the shared
+      # internal telemetry network and publishes no host port.
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://dentnode-telemetry-agent:4318/v1/traces
+      OTEL_SERVICE_NAME: ai.dentnode.com
+      OTEL_SERVICE_VERSION: ${AI_IMAGE}
     expose:
       - "8080"
     networks:

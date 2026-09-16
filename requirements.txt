@@ -8,6 +8,17 @@ httpx>=0.27.0
 pydantic>=2.7.0
 python-dotenv>=1.0.0
 
+# Production tracing. The SDK/exporter release and contrib instrumentation
+# release are the matching OpenTelemetry set. Instrumentation is configured
+# explicitly in telemetry.py; broad auto-instrumentation is deliberately not
+# used because this service handles patient data.
+# google-adk 2.2 currently caps the SDK/API at 1.41.1. The corresponding
+# contrib release is 0.62b1; keep this set aligned when ADK's cap moves.
+opentelemetry-api==1.41.1
+opentelemetry-sdk==1.41.1
+opentelemetry-exporter-otlp-proto-http==1.41.1
+opentelemetry-instrumentation-httpx==0.62b1
+
 # Scan Review (standalone mesh QA module). trimesh's loaders + topology need
 # only numpy; the heavy rtree/embree extras are deliberately NOT installed, so
 # the image stays small and the analysis stays pure-Python.
