@@ -254,5 +254,10 @@ Or run the whole stack with `docker-compose up` from the workspace root.
 
 ## Deploy
 
-CI/CD only (GitHub Actions → Cloud Run, region `asia-south2`, `--ingress
-internal`). See `.github/workflows/`. Never deploy manually.
+Production deploys run through `.github/workflows/deploy-vps.yaml`: a push to
+`main` is tested, published to GHCR by immutable digest, and released through
+the VPS restricted dispatcher. There is no staging deployment.
+
+The former Cloud Run path is retained temporarily as a manual-only rollback
+option during GCP retirement. It does not run on pushes and does not gate VPS
+deployment. Do not deploy either target outside its GitHub Actions workflow.

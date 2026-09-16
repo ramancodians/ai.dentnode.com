@@ -15,13 +15,22 @@ def test_vps_workflow_is_digest_only_and_actions_are_commit_pinned():
     uses = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE)
     assert uses
     assert all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", item) for item in uses)
-    assert "workflow_run:" in workflow
-    assert 'workflows: ["Deploy Laby Agent to Cloud Run"]' in workflow
+    assert re.search(r"^  push:\n    branches: \[main\]$", workflow, flags=re.MULTILINE)
+    assert "workflow_dispatch:" in workflow
+    assert "workflow_run:" not in workflow
+    assert "github.event.workflow_run" not in workflow
     assert "deploy-auth $SERVICE_ID $image_ref $GHCR_ACTOR" in workflow
     assert "printf '%s' \"$GHCR_TOKEN\" | ssh" in workflow
     assert "ssh-keyscan" not in workflow
     assert "IMAGE_DIGEST" in workflow
     assert "sha256:[0-9a-f]{64}" in workflow
+
+
+def test_legacy_cloud_run_deployment_is_manual_only():
+    workflow = (ROOT / ".github/workflows/cloud-run-deploy.yaml").read_text()
+
+    assert "workflow_dispatch:" in workflow
+    assert not re.search(r"^  push:\s*$", workflow, flags=re.MULTILINE)
 
 
 def test_vps_compose_has_no_public_port_or_data_network():
