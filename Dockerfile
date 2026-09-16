@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # App code.
 COPY server.py .
+COPY telemetry.py .
 COPY agent ./agent
 COPY scan_review ./scan_review
 # server.py imports scan_qa unconditionally — omitting this kills the container

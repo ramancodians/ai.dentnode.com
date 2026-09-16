@@ -58,6 +58,7 @@ from scan_review.config import settings as scan_review_settings
 # Segmentation-conditioned scan QA. Owns /scan-qa/*; findings carry mesh
 # coordinates so the DN3D viewer can pin them to the model.
 from scan_qa import scan_qa_router
+from telemetry import configure_telemetry
 
 # Wire JSON logging before the first log line is emitted.
 setup_logging(settings.log_level)
@@ -99,6 +100,7 @@ app = FastAPI(title="Laby ADK Agent", version="1.0.0", lifespan=lifespan)
 
 app.include_router(scan_review_router)
 app.include_router(scan_qa_router)
+configure_telemetry(app)
 
 
 class HistoryTurn(BaseModel):

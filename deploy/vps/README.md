@@ -62,8 +62,22 @@ Initially set the Node application's `LABY_AGENT_URL` to
 changes at promotion. A stable private routing alias can replace the HTTPS URL
 later without changing this service.
 
-## Telemetry limitation
+## Application tracing
 
-JSON container logs and Docker resource metrics are collected by the host
-telemetry stack. This repository does not yet include OpenTelemetry SDK
-instrumentation, so distributed traces require a separate code change.
+The service exports sampled traces to the host OpenTelemetry collector at
+`http://dentnode-telemetry-agent:4318/v1/traces` over the private
+`dentnode-telemetry` Docker network. No OTLP port is published on the VPS.
+Before deploying this revision, the collector must expose an OTLP/HTTP receiver
+on `0.0.0.0:4318` and include that receiver in its traces pipeline to SigNoz.
+
+`OTEL_TRACES_SAMPLER_ARG` controls root-trace head sampling and defaults to `0.10`;
+upstream parent decisions are honored. The immutable image digest is exported
+as `service.version`, so SigNoz can separate releases.
+
+Telemetry has an exporter-boundary privacy allowlist. Inbound FastAPI spans
+contain method, registered route template, response status, protocol and
+duration. Outbound HTTPX spans contain method, destination hostname/port,
+response status and duration. Request/response bodies, headers, query strings,
+concrete route parameters, client addresses, exception messages/events,
+baggage, arbitrary attributes and secrets are never exported. Do not replace
+this with broad OpenTelemetry auto-instrumentation.
