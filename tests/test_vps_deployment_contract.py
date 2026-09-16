@@ -33,6 +33,20 @@ def test_legacy_cloud_run_deployment_is_manual_only():
     assert not re.search(r"^  push:\s*$", workflow, flags=re.MULTILINE)
 
 
+def test_pull_request_ci_is_read_only_and_has_no_deployment_credentials():
+    workflow = (ROOT / ".github/workflows/ci.yaml").read_text()
+
+    uses = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE)
+    assert uses
+    assert all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", item) for item in uses)
+    assert "pull_request:" in workflow
+    assert "contents: read" in workflow
+    assert "packages: write" not in workflow
+    assert "secrets." not in workflow
+    assert "docker" not in workflow.lower()
+    assert "ssh" not in workflow.lower()
+
+
 def test_vps_compose_has_no_public_port_or_data_network():
     compose = yaml.safe_load((ROOT / "deploy/vps/compose.yaml").read_text())
     service = compose["services"]["ai"]

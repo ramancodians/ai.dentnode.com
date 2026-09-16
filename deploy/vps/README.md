@@ -8,6 +8,8 @@ the VPS service-scoped dispatcher.
 `deploy-vps.yaml` is the only automatic production deployment: every push to
 `main` runs the full test suite, builds the exact tested commit, publishes it to
 GHCR by immutable digest, and sends that digest to the restricted dispatcher.
+Pull requests run the same test suite in `ci.yaml` without registry, VPS, or GCP
+credentials.
 The old Cloud Run workflow is manual-only and is not a prerequisite or fallback
 inside the VPS workflow. This repository has no staging deployment path.
 
