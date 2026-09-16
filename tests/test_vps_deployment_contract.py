@@ -1,0 +1,49 @@
+"""Static guardrails for the VPS image and delivery contract."""
+
+import re
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_vps_workflow_is_digest_only_and_actions_are_commit_pinned():
+    workflow = (ROOT / ".github/workflows/deploy-vps.yaml").read_text()
+
+    uses = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, flags=re.MULTILINE)
+    assert uses
+    assert all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", item) for item in uses)
+    assert "workflow_run:" in workflow
+    assert 'workflows: ["Deploy Laby Agent to Cloud Run"]' in workflow
+    assert "deploy-auth $SERVICE_ID $image_ref $GHCR_ACTOR" in workflow
+    assert "printf '%s' \"$GHCR_TOKEN\" | ssh" in workflow
+    assert "ssh-keyscan" not in workflow
+    assert "IMAGE_DIGEST" in workflow
+    assert "sha256:[0-9a-f]{64}" in workflow
+
+
+def test_vps_compose_has_no_public_port_or_data_network():
+    compose = yaml.safe_load((ROOT / "deploy/vps/compose.yaml").read_text())
+    service = compose["services"]["ai"]
+
+    assert service["image"].startswith("${AI_IMAGE:?")
+    assert service["user"] == "10001:10001"
+    assert service["read_only"] is True
+    assert "ports" not in service
+    assert service["expose"] == ["8080"]
+    assert set(service["networks"]) == {"dentnode-edge", "dentnode-telemetry"}
+    assert "dentnode-data" not in compose["networks"]
+    assert service["security_opt"] == ["no-new-privileges:true"]
+    assert service["cap_drop"] == ["ALL"]
+    assert service["healthcheck"]["test"][0] == "CMD"
+
+
+def test_production_image_runs_nonroot_and_has_an_internal_healthcheck():
+    dockerfile = (ROOT / "Dockerfile").read_text()
+
+    assert "USER laby" in dockerfile
+    assert "HEALTHCHECK" in dockerfile
+    assert "http://127.0.0.1:" in dockerfile
+    assert "install -d -o laby -g laby -m 0700 /var/lib/dentnode-ai" in dockerfile

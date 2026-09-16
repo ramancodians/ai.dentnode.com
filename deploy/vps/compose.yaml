@@ -1,0 +1,67 @@
+name: dentnode-ai
+
+services:
+  ai:
+    image: ${AI_IMAGE:?set AI_IMAGE to an immutable GHCR digest}
+    container_name: dentnode-ai
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    env_file:
+      - ./env/runtime.env
+      - ./env/secrets.env
+    environment:
+      PORT: "8080"
+      D10_USAGE_OUTBOX_PATH: /var/lib/dentnode-ai/d10-usage-outbox.sqlite3
+    expose:
+      - "8080"
+    networks:
+      dentnode-edge:
+        aliases:
+          - dentnode-ai
+      dentnode-telemetry: {}
+    volumes:
+      - type: bind
+        source: ${AI_OUTBOX_DIR:-/var/lib/dentnode/ai-outbox}
+        target: /var/lib/dentnode-ai
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8080')+'/health', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    stop_grace_period: 40s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
+    mem_limit: ${AI_MEMORY_LIMIT:-1g}
+    cpus: ${AI_CPU_LIMIT:-1.0}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      com.dentnode.service: ai.dentnode.com
+      com.dentnode.role: api
+
+networks:
+  dentnode-edge:
+    external: true
+    name: dentnode-edge
+  dentnode-telemetry:
+    external: true
+    name: dentnode-telemetry

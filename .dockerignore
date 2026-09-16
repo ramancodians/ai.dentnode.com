@@ -1,0 +1,33 @@
+.git
+.github
+.codebase-memory
+.env
+.env.*
+!.env.example
+.venv
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.cache
+.data
+.tmp
+coverage
+htmlcov
+*.log
+
+# Not part of the production Python service/image.
+legacy
+tests
+requirements-dev.txt
+deploy
+AI_SERVER_GUIDE.md
+CHANGELOG.md
+IMAGE_TO_ENTRY.md
+README.md
+RUNBOOK.md
+
+# Large research/model artifacts are not imported by the runtime service.
+vendor
