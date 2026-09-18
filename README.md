@@ -2,8 +2,8 @@
 
 The reasoning service behind **Laby**, DentNode's in-app AI co-pilot for dental
 labs. Built on **Google's Agent Development Kit (ADK)**, with every model served
-through **OpenRouter** (via ADK's LiteLLM wrapper), deployed to **Cloud Run**
-(internal ingress only).
+through **OpenRouter** (via ADK's LiteLLM wrapper), deployed privately on the
+DentNode VPS behind Caddy.
 
 > **OpenRouter only.** This service never calls a model provider's API
 > directly. Provider credentials are configured as **BYOK** keys inside the
@@ -258,6 +258,6 @@ Production deploys run through `.github/workflows/deploy-vps.yaml`: a push to
 `main` is tested, published to GHCR by immutable digest, and released through
 the VPS restricted dispatcher. There is no staging deployment.
 
-The former Cloud Run path is retained temporarily as a manual-only rollback
-option during GCP retirement. It does not run on pushes and does not gate VPS
-deployment. Do not deploy either target outside its GitHub Actions workflow.
+Cloud Run hosting has been retired. Rollbacks use the previous immutable VPS
+image retained by the restricted dispatcher. Do not deploy production outside
+the VPS GitHub Actions workflow.
