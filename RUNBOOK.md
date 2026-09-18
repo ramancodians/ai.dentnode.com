@@ -1,213 +1,83 @@
-# Laby Agent — Deployment Runbook
+# Laby Agent — VPS deployment runbook
 
-## Service identity
+## Production identity
 
 | Item | Value |
 |------|-------|
-| GCP project | `app-dentnode-com` |
-| Region | `asia-south2` |
-| Cloud Run service | `laby-agent` |
-| Artifact Registry repo | `asia-south2-docker.pkg.dev/app-dentnode-com/dn-dashboard` |
-| Ingress | Internal only (no public internet exposure) |
+| Public name | `https://ai.dentnode.com` |
+| Runtime | DentNode VPS, Docker, Caddy |
+| Deployment | `.github/workflows/deploy-vps.yaml` |
+| Image | `ghcr.io/ramancodians/ai.dentnode.com@sha256:<digest>` |
+| Health | `GET /health` |
 
-## Secrets (GCP Secret Manager)
-
-| Secret Manager name | Injected env var |
-|---------------------|-----------------|
-| `LABY_INTERNAL_API_KEY` | `INTERNAL_API_KEY` |
-| `LABY_OPENROUTER_API_KEY` | `OPENROUTER_API_KEY` |
-
-All LLM traffic goes through **OpenRouter** (BYOK — provider credentials are
-configured in the OpenRouter dashboard, not here). There is no provider API key
-in this service. The old `LABY_DEEPSEEK_API_KEY` secret is unused as of the
-OpenRouter cutover and can be destroyed once the new revision is at 100%.
-
-To rotate a secret:
-```bash
-echo -n "new-value" | gcloud secrets versions add LABY_INTERNAL_API_KEY \
-  --data-file=- --project=app-dentnode-com
-# Then redeploy via GitHub Actions (push to main or workflow_dispatch).
-```
-
-## Environment variables
-
-**The workflow is the source of truth, not the live service.** The deploy step
-uses `--set-env-vars`, which *replaces* the entire literal-env list on every
-revision — a variable that is not in
-`.github/workflows/cloud-run-deploy.yaml` gets deleted from the next revision,
-even if someone set it by hand yesterday. Every knob read by
-`agent/config.py` and `scan_review/config.py` is listed there.
-
-`PORT` is the one exception: Cloud Run injects it and rejects it as an input, so
-it must never appear in the list.
-
-### Changing an env var
-
-Edit the `ENV_VARS` block in the workflow and push to `main`. That is the only
-change that survives.
-
-If you need it live *right now*, apply it by hand — but re-state the full list,
-and remember the promote step:
-
-```bash
-gcloud run services update laby-agent \
-  --region=asia-south2 --project=app-dentnode-com \
-  --update-env-vars=LABY_TURN_TIMEOUT=180   # --update- merges; --set- would wipe the rest
-
-# Traffic is PINNED to a named revision (see below), so the revision you just
-# created is serving 0% until you promote it.
-REV=$(gcloud run revisions list --service=laby-agent --region=asia-south2 \
-  --project=app-dentnode-com --sort-by="~DEPLOYED" --limit=1 --format="value(name)")
-gcloud run services update-traffic laby-agent \
-  --region=asia-south2 --project=app-dentnode-com --to-revisions=$REV=100
-```
-
-Then put the same change in the workflow, or the next deploy reverts it.
-
-### Traffic is pinned, not "latest"
-
-The workflow promotes with `update-traffic --to-revisions=<name>=100`, which
-turns off latest-revision serving for good. Consequence: **creating a revision
-is not deploying it.** `gcloud run services describe` shows the *desired*
-template, so the env list there can look correct while the revision actually
-serving traffic has none of it. Always check what is serving:
-
-```bash
-gcloud run services describe laby-agent --region=asia-south2 \
-  --project=app-dentnode-com --format="value(status.traffic)"
-```
+Cloud Run hosting was retired on 2026-09-19. There is no Cloud Run deployment
+workflow or Cloud Run rollback path.
 
 ## Normal deployment
 
-Push to `main` — the GitHub Actions workflow (`cloud-run-deploy.yaml`) handles
-everything: run tests → build → canary at 10% → health check → promote to 100%.
+A push to `main` runs the VPS workflow. It checks out the exact commit, runs the
+test suite, builds and pushes an immutable GHCR image, and sends only its digest
+to the service-scoped restricted dispatcher.
 
-To trigger manually without a code change:
-```
-GitHub → Actions → "Deploy Laby Agent to Cloud Run" → Run workflow
-```
+The dispatcher must:
 
-## Manual rollback
+1. pull by digest using the short-lived GitHub token;
+2. start and health-check a private candidate;
+3. verify the candidate from the Caddy network;
+4. atomically switch the public route; and
+5. retain the previous digest for rollback.
 
-If a bad deploy gets past the canary:
+See `deploy/vps/README.md` for the complete host contract and required GitHub
+environment secrets.
 
-```bash
-# List the two most recent revisions
-gcloud run revisions list \
-  --service=laby-agent --region=asia-south2 --project=app-dentnode-com \
-  --sort-by="~DEPLOYED" --limit=3 --format="table(name,status.conditions[0].type)"
+## Health checks
 
-# Route 100% to the known-good revision
-gcloud run services update-traffic laby-agent \
-  --region=asia-south2 --project=app-dentnode-com \
-  --to-revisions=laby-agent-XXXXXXXX=100
-```
-
-## Health check
+Public liveness:
 
 ```bash
-# Get the service URL
-URL=$(gcloud run services describe laby-agent \
-  --region=asia-south2 --project=app-dentnode-com --format="value(status.url)")
-
-# The service is internal-only; call from a VM or Cloud Shell inside the VPC
-curl -sf "${URL}/health" | jq .
-# Expected: {"status":"healthy","service":"laby-adk","model":"openrouter/deepseek/deepseek-v4-flash","provider":"openrouter"}
+curl -fsS https://ai.dentnode.com/health
 ```
 
-## Smoke test (from inside the VPC)
+Expected response fields include `status=healthy`, `service=laby-adk`, and the
+configured model provider. This endpoint does not make a billable model call.
+
+From the VPS Caddy network, verify a candidate before promotion:
 
 ```bash
-curl -sf -X POST "${URL}/agent/run" \
-  -H "Content-Type: application/json" \
-  -H "x-internal-key: ${INTERNAL_API_KEY}" \
-  -d '{"lab_id":"<real-lab-id>","user_id":"test","question":"how many cases today?"}' \
-  --no-buffer
+docker exec dentnode-caddy wget -qO- http://dentnode-ai-candidate:8080/health
 ```
 
-Expect a stream of NDJSON lines ending in `{"type":"done"}`.
+Then call `GET /text-to-speech/voices` with the internal key to exercise service
+authentication without invoking a model.
 
-## Logs
+## Rollback
+
+Use the restricted dispatcher to restore the previously retained immutable
+digest. Do not rebuild an old commit, deploy a mutable tag, or recreate the
+former Cloud Run service.
+
+After rollback, verify both:
 
 ```bash
-gcloud logging read \
-  'resource.type="cloud_run_revision" resource.labels.service_name="laby-agent"' \
-  --project=app-dentnode-com --limit=100 --format=json | jq '.[].jsonPayload'
+curl -fsS https://ai.dentnode.com/health
+curl -fsS https://app.dentnode.com/api/health/ready
 ```
 
-Filter by severity:
-```bash
-gcloud logging read \
-  'resource.type="cloud_run_revision" resource.labels.service_name="laby-agent" severity>=ERROR' \
-  --project=app-dentnode-com --limit=50
-```
+## Configuration and secrets
 
-## Common failure modes
+Runtime configuration is held in the root-owned VPS files under
+`/opt/dentnode/apps/ai.dentnode.com/env/`:
 
-### Service returns 500 on startup
+- `runtime.env` — non-secret runtime configuration
+- `release.env` — immutable release metadata
+- `secrets.env` — mode `0600`, root-owned secrets
 
-Check that both secrets are present and the latest version is accessible:
-```bash
-gcloud secrets versions list LABY_INTERNAL_API_KEY --project=app-dentnode-com
-gcloud secrets versions list LABY_OPENROUTER_API_KEY --project=app-dentnode-com
-```
+The service must remain attached only to `dentnode-edge` and
+`dentnode-telemetry`; it must not join `dentnode-data`. The Node application
+calls the stable `https://ai.dentnode.com` URL using the shared internal key.
 
-### Agent turns time out (`TURN_TIMEOUT` error)
+## Observability
 
-OpenRouter (or the upstream provider it routed to) may be slow or rate-limiting.
-Check https://status.openrouter.ai and the OpenRouter activity dashboard. To increase
-the timeout (default 120 s), change `LABY_TURN_TIMEOUT` in
-`.github/workflows/cloud-run-deploy.yaml` and push — see "Changing an env var" below.
-
-### Tool calls fail (`tool_error` in notes)
-
-The agent could not reach the Node backend. Check:
-1. `NODE_INTERNAL_BASE_URL` is set correctly (should be `https://app.dentnode.com/api`)
-2. `INTERNAL_API_KEY` on this service matches the Node backend's value
-3. Node backend `/internal/laby-tools/:tool` endpoints are healthy
-
-### Canary health check fails in CI
-
-The new revision failed `/health`. Check the Cloud Run logs for the candidate
-revision. Common causes: missing secret version, bad `LABY_MODEL` value, or a
-Python import error in the new code.
-
-## Resource configuration (Cloud Run)
-
-Current defaults used by the CI deploy command. Adjust if you see OOM crashes:
-
-| Setting | Value |
-|---------|-------|
-| Memory | 512Mi (set via `--memory 512Mi` in deploy step if needed) |
-| CPU | 1 |
-| Min instances | 0 (scales to zero) |
-| Max instances | 10 |
-| Concurrency | 80 (Cloud Run default) |
-
-To update:
-```bash
-gcloud run services update laby-agent \
-  --region=asia-south2 --project=app-dentnode-com \
-  --memory=1Gi --cpu=2
-```
-
-## Running tests locally
-
-```bash
-cd codebases/ai.dentnode.com
-cp .env.example .env        # fill in real keys
-pip install -r requirements.txt -r requirements-dev.txt
-pytest tests/ -v
-```
-
-## First-time GCP setup checklist
-
-- [ ] Create GCP project `app-dentnode-com` (or reuse existing)
-- [ ] Enable Cloud Run API, Artifact Registry API, Secret Manager API
-- [ ] Create Artifact Registry repo `dn-dashboard` in `asia-south2`
-- [ ] Create secrets `LABY_INTERNAL_API_KEY` and `LABY_OPENROUTER_API_KEY`
-- [ ] Add the provider key(s) as BYOK integrations in the OpenRouter dashboard
-      (Settings → Integrations), so OpenRouter bills/routes them for us
-- [ ] Create a service account with roles: Cloud Run Admin, Artifact Registry Writer, Secret Manager Secret Accessor
-- [ ] Add service account JSON as GitHub secret `GCP_SERVICE_ACCOUNT`
-- [ ] Push to `main` to trigger first deploy
+Traces are exported to the private host collector at
+`http://dentnode-telemetry-agent:4318/v1/traces`. No OTLP port is public. Use
+SigNoz for service health, errors, and trace investigation.

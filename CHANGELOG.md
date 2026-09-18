@@ -3,8 +3,14 @@
 All notable changes to the Laby ADK agent service (`ai.dentnode.com`).
 
 Newest first. Each entry records what changed, plus anything that must be true in
-the environment for it to run — this service is deployed to Cloud Run by CI, so
-missing env vars and Secret Manager entries are the usual cause of a failed rollout.
+the environment for it to run. Production is deployed to the DentNode VPS by CI.
+
+## [Unreleased] — Retire Cloud Run hosting
+
+- Removed the legacy manual Cloud Run deployment workflow after the VPS served
+  production successfully through the migration soak period.
+- The VPS workflow is now the sole production deployment path; rollback uses
+  the previous immutable image retained by the restricted dispatcher.
 
 ## [Unreleased] — Speaker diarization on /audio-to-text, and full env parity
 

@@ -26,11 +26,8 @@ def test_vps_workflow_is_digest_only_and_actions_are_commit_pinned():
     assert "sha256:[0-9a-f]{64}" in workflow
 
 
-def test_legacy_cloud_run_deployment_is_manual_only():
-    workflow = (ROOT / ".github/workflows/cloud-run-deploy.yaml").read_text()
-
-    assert "workflow_dispatch:" in workflow
-    assert not re.search(r"^  push:\s*$", workflow, flags=re.MULTILINE)
+def test_cloud_run_deployment_is_removed():
+    assert not (ROOT / ".github/workflows/cloud-run-deploy.yaml").exists()
 
 
 def test_pull_request_ci_is_read_only_and_has_no_deployment_credentials():
