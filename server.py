@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -101,6 +101,19 @@ app = FastAPI(title="Laby ADK Agent", version="1.0.0", lifespan=lifespan)
 app.include_router(scan_review_router)
 app.include_router(scan_qa_router)
 configure_telemetry(app)
+
+
+# Uploaded call recordings are accepted only in formats the configured
+# transcription provider supports directly. Never infer a codec from a filename
+# or accept application/octet-stream: this route is an internal byte boundary,
+# not a general-purpose file upload.
+CALL_AUDIO_MIME_FORMATS = {
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/mpeg": "mp3",
+    "audio/flac": "flac",
+    "audio/mp4": "m4a",
+}
 
 
 class HistoryTurn(BaseModel):
@@ -452,6 +465,75 @@ async def audio_to_text(
         "audio_bytes": result.audio_bytes,
         "segments": result.segments,
     }
+
+
+@app.post("/internal/call-audio/analyze")
+async def analyze_call_audio(
+    file: UploadFile = File(...),
+    lab_id: str = Form(..., min_length=1, max_length=128),
+    call_id: str = Form(..., min_length=1, max_length=128),
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_internal_id: Optional[str] = Header(default=None, alias="x-internal-id"),
+) -> Dict[str, Optional[str]]:
+    """Transcribe and summarize one app-owned call recording upload.
+
+    The service is intentionally stateless. The calling app owns job and
+    ``call_id`` idempotency; this endpoint performs no remote fetch and stores
+    neither the uploaded audio nor the generated text.
+    """
+    _require_internal_key(x_internal_key or x_internal_id)
+
+    mime_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    audio_format = CALL_AUDIO_MIME_FORMATS.get(mime_type)
+    if audio_format is None:
+        raise HTTPException(status_code=415, detail="Unsupported audio type")
+
+    audio = await file.read(settings.audio_to_text_max_bytes + 1)
+    await file.close()
+    if not audio:
+        raise HTTPException(status_code=400, detail="Audio file is empty")
+    if len(audio) > settings.audio_to_text_max_bytes:
+        raise HTTPException(status_code=413, detail="Audio file is too large")
+
+    try:
+        result = await transcribe_audio(
+            audio_bytes=audio,
+            audio_format=audio_format,
+            summary=True,
+        )
+    except Exception as exc:  # provider errors must never expose call content
+        logger.error(
+            "Call audio analysis failed",
+            extra={"lab_id": lab_id, "error_type": type(exc).__name__},
+        )
+        _fire_and_forget(
+            report_usage(
+                feature="call_audio_analysis",
+                lab_id=lab_id,
+                model=settings.audio_to_text_model,
+                status="error",
+                request_id=call_id,
+                meta={"audio_bytes": len(audio), "audio_format": audio_format},
+            )
+        )
+        raise HTTPException(status_code=502, detail="Call audio analysis failed")
+
+    _fire_and_forget(
+        report_usage(
+            feature="call_audio_analysis",
+            lab_id=lab_id,
+            model=result.model,
+            usage=result.usage,
+            cost=result.cost_usd,
+            cost_source="openrouter" if result.cost_usd is not None else "estimated",
+            latency_ms=result.latency_ms,
+            status="ok",
+            request_id=call_id,
+            meta={"audio_bytes": len(audio), "audio_format": audio_format},
+        )
+    )
+
+    return {"transcript": result.transcript, "summary": result.summary}
 
 
 # Keeps X-TTS-Transcript-B64 inside a typical 8 KB per-header proxy limit even

@@ -50,6 +50,7 @@ Node's `AiUsageEvent` ledger via `POST /api/internal/ai-usage`.
 | `POST /rejected-cases-report` | Rejected-cases ops report (Node cron) | `LABY_VISION_MODEL` |
 | `POST /product-update-email` | Weekly product-update marketing copy (Node cron) | `LABY_MODEL` |
 | `POST /audio-to-text` | **Audio-to-Text** — transcribe (with speaker diarization) + summarise a Digital Ocean audio URL (shared by app.dentnode.com + d10.live) | `AUDIO_TO_TEXT_MODEL` |
+| `POST /internal/call-audio/analyze` | **Call analysis** — transcribe + summarise an app-owned multipart recording upload | `AUDIO_TO_TEXT_MODEL` |
 | `POST /text-to-speech` | **Text-to-Speech** — synthesise speech and stream the audio bytes back (open to every trusted internal caller) | `TEXT_TO_SPEECH_MODEL` |
 | `GET /text-to-speech/voices` | Voices, formats and limits the TTS endpoint accepts | — |
 | `POST /scan-review/analyze` | **Scan Review** — mesh QA from raw STL URLs (standalone module, not Laby) | `SCAN_REVIEW_MODEL` |
@@ -115,6 +116,20 @@ The URL is caller-supplied, which makes `AUDIO_TO_TEXT_ALLOWED_HOSTS` an SSRF
 control rather than a preference — it is pinned in the deploy workflow for that
 reason, and `AUDIO_TO_TEXT_ALLOW_INSECURE_FETCH` must stay `false` anywhere
 deployed.
+
+### Internal call recording analysis
+
+`POST /internal/call-audio/analyze` is the byte-upload contract used by the
+DentNode calling integration. It requires `x-internal-key` and multipart fields
+`file`, `lab_id`, and `call_id`; it returns exactly `{"transcript": ..., "summary":
+...}`. Only the explicit audio MIME allowlist in `server.py` is accepted, and
+the upload is bounded by `AUDIO_TO_TEXT_MAX_BYTES`. The route never fetches a
+caller-supplied URL and stores neither audio nor generated text.
+
+This service is stateless with respect to call analysis. The app owns durable
+job state and must deduplicate/retry by `call_id`; repeating a request here may
+repeat provider work and usage charges. Usage events are attributed to
+`lab_id`, with `call_id` used only as the metering correlation id.
 
 ## Text-to-Speech
 
