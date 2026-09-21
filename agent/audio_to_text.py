@@ -136,6 +136,7 @@ async def transcribe_audio(
         raise OpenRouterError(
             "OpenRouter transcription failed",
             code="provider_http_error",
+            status_code=response.status_code,
         )
     try:
         data = response.json()
@@ -143,6 +144,7 @@ async def transcribe_audio(
         raise OpenRouterError(
             "OpenRouter transcription returned an invalid response",
             code="invalid_response",
+            status_code=response.status_code,
         ) from exc
 
     transcript = str(data.get("text") or "").strip()

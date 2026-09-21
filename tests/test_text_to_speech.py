@@ -229,10 +229,13 @@ async def test_request_body_pins_the_openrouter_audio_contract(fake_openrouter):
 async def test_open_raises_before_any_byte_when_upstream_errors(fake_openrouter):
     fake_openrouter["status_code"] = 402
     fake_openrouter["body"] = b'{"error":{"message":"Insufficient credits"}}'
-    with pytest.raises(OpenRouterError, match="402"):
+    with pytest.raises(OpenRouterError) as exc_info:
         await tts.SpeechStream(
             text="hello", voice="alloy", audio_format="wav"
         ).open()
+    assert exc_info.value.code == "provider_http_error"
+    assert exc_info.value.status_code == 402
+    assert "Insufficient credits" not in str(exc_info.value)
 
 
 async def test_open_raises_when_the_stream_carries_no_audio(fake_openrouter):

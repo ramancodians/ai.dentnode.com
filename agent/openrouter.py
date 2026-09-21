@@ -54,9 +54,11 @@ class OpenRouterError(RuntimeError):
         message: str = "OpenRouter request failed",
         *,
         code: str = "openrouter_error",
+        status_code: Optional[int] = None,
     ):
         super().__init__(message)
         self.code = code
+        self.status_code = status_code
 
 
 @dataclass
@@ -149,7 +151,10 @@ async def chat_completion(
         OpenRouterError: on missing key, HTTP error status, or transport/timeout.
     """
     if not settings.openrouter_api_key:
-        raise OpenRouterError("OPENROUTER_API_KEY is not configured")
+        raise OpenRouterError(
+            "OpenRouter is not configured",
+            code="not_configured",
+        )
 
     slug = _strip_route_prefix(model)
 
@@ -181,24 +186,36 @@ async def chat_completion(
         async with httpx.AsyncClient(timeout=timeout_secs) as client:
             resp = await client.post(url, json=body, headers=headers)
     except httpx.HTTPError as exc:
-        raise OpenRouterError(f"OpenRouter request failed: {exc}") from exc
+        raise OpenRouterError(
+            "OpenRouter request failed",
+            code="transport_error",
+        ) from exc
 
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     if resp.status_code >= 400:
-        detail = resp.text[:300]
         raise OpenRouterError(
-            f"OpenRouter returned {resp.status_code}: {detail}"
+            "OpenRouter request failed",
+            code="provider_http_error",
+            status_code=resp.status_code,
         )
 
     try:
         data = resp.json()
     except Exception as exc:  # noqa: BLE001
-        raise OpenRouterError(f"OpenRouter returned non-JSON body: {exc}") from exc
+        raise OpenRouterError(
+            "OpenRouter returned an invalid response",
+            code="invalid_response",
+            status_code=resp.status_code,
+        ) from exc
 
     choices = data.get("choices") or []
     if not choices:
-        raise OpenRouterError("OpenRouter response had no choices")
+        raise OpenRouterError(
+            "OpenRouter returned an invalid response",
+            code="missing_choices",
+            status_code=resp.status_code,
+        )
 
     message = choices[0].get("message") or {}
     text = message.get("content") or ""
