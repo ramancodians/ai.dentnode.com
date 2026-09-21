@@ -43,7 +43,20 @@ _DEFAULT_TIMEOUT_SECS = 60.0
 
 
 class OpenRouterError(RuntimeError):
-    """Raised on any HTTP, timeout, or transport failure talking to OpenRouter."""
+    """Sanitized provider failure safe to expose to service logs.
+
+    ``code`` is stable for metrics/control flow. ``message`` must never contain
+    provider response bodies, prompts, transcripts, or patient data.
+    """
+
+    def __init__(
+        self,
+        message: str = "OpenRouter request failed",
+        *,
+        code: str = "openrouter_error",
+    ):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass

@@ -198,6 +198,31 @@ async def test_transcribe_audio_attaches_completed_stt_when_summary_fails(monkey
     assert partial.summary is None
 
 
+@pytest.mark.asyncio
+async def test_transcription_provider_error_has_stable_sanitized_message(monkeypatch):
+    import agent.audio_to_text as audio_to_text
+
+    secret = "SECRET_PATIENT_MARKER"
+    response = SimpleNamespace(status_code=502, text=f"provider leaked {secret}")
+
+    async def fake_post(*_args, **_kwargs):
+        return response
+
+    monkeypatch.setattr(audio_to_text.settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(audio_to_text.httpx.AsyncClient, "post", fake_post)
+
+    with pytest.raises(OpenRouterError) as exc_info:
+        await transcribe_audio(
+            audio_bytes=WAV_BYTES,
+            audio_format="wav",
+            summary=False,
+        )
+
+    assert str(exc_info.value) == "OpenRouter transcription failed"
+    assert exc_info.value.code == "provider_http_error"
+    assert secret not in str(exc_info.value)
+
+
 # ── endpoint (shared auth + DO-only) ─────────────────────────────────────
 
 _BODY = {"audio_url": "https://b.nyc3.digitaloceanspaces.com/a.wav"}
@@ -357,3 +382,39 @@ def test_audio_to_text_meters_completed_transcription_when_summary_fails(
         ("summary", "error"),
     ]
     assert events[0]["cost"] == 0.001
+
+
+def test_audio_to_text_never_logs_provider_response_text(client, monkeypatch, caplog):
+    import server
+    import agent.audio_to_text as audio_to_text
+    from agent.audio_fetch import FetchedAudio
+
+    secret = "SECRET_PATIENT_MARKER"
+    provider_response = SimpleNamespace(
+        status_code=502,
+        text=f"upstream response contains {secret}",
+    )
+
+    async def fake_fetch(url):
+        return FetchedAudio(url=url, data=WAV_BYTES, format="wav")
+
+    async def fake_post(*_args, **_kwargs):
+        return provider_response
+
+    monkeypatch.setattr(server, "fetch_audio", fake_fetch)
+    monkeypatch.setattr(audio_to_text.settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(audio_to_text.httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(server, "report_usage", lambda **_kwargs: None)
+    monkeypatch.setattr(server, "_fire_and_forget", lambda _coro: None)
+
+    with caplog.at_level("ERROR"):
+        response = client.post(
+            "/audio-to-text", json=_BODY, headers={"x-internal-key": TEST_KEY}
+        )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "success": False,
+        "error": "Audio-to-text model call failed",
+    }
+    assert secret not in caplog.text

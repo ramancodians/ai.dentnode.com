@@ -95,7 +95,10 @@ async def transcribe_audio(
     b64 = base64.b64encode(audio_bytes).decode()
 
     if not settings.openrouter_api_key:
-        raise OpenRouterError("OPENROUTER_API_KEY is not configured")
+        raise OpenRouterError(
+            "OpenRouter transcription is not configured",
+            code="not_configured",
+        )
 
     # Use OpenRouter's purpose-built STT endpoint rather than Chat Completions.
     # `microsoft/mai-transcribe-2` exposes Azure's diarization capability through
@@ -124,20 +127,30 @@ async def transcribe_audio(
                 headers=headers,
             )
     except httpx.HTTPError as exc:
-        raise OpenRouterError(f"OpenRouter transcription request failed: {exc}") from exc
+        raise OpenRouterError(
+            "OpenRouter transcription failed",
+            code="transport_error",
+        ) from exc
     latency_ms = int((time.monotonic() - t0) * 1000)
     if response.status_code >= 400:
         raise OpenRouterError(
-            f"OpenRouter transcription returned {response.status_code}: {response.text[:300]}"
+            "OpenRouter transcription failed",
+            code="provider_http_error",
         )
     try:
         data = response.json()
     except ValueError as exc:
-        raise OpenRouterError("OpenRouter transcription returned non-JSON") from exc
+        raise OpenRouterError(
+            "OpenRouter transcription returned an invalid response",
+            code="invalid_response",
+        ) from exc
 
     transcript = str(data.get("text") or "").strip()
     if not transcript:
-        raise OpenRouterError("OpenRouter transcription returned an empty transcript")
+        raise OpenRouterError(
+            "OpenRouter transcription returned an empty transcript",
+            code="empty_transcript",
+        )
     raw_usage = data.get("usage") or {}
     cost_usd: Optional[float] = None
     try:

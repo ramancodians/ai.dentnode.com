@@ -610,7 +610,11 @@ async def audio_to_text(
     except OpenRouterError as exc:
         logger.error(
             "Audio-to-text generation failed",
-            extra={"lab_id": lab_id, "error": str(exc)},
+            extra={
+                "lab_id": lab_id,
+                "error_type": type(exc).__name__,
+                "error_code": exc.code,
+            },
         )
         _fire_and_forget(
             report_usage(

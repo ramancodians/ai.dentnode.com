@@ -163,6 +163,30 @@ def test_rejects_unrecognized_bytes_even_with_allowed_mime(client):
     assert response.json() == {"success": False, "error": "Invalid audio content"}
 
 
+@pytest.mark.parametrize(
+    ("mime_type", "truncated"),
+    [
+        ("audio/wav", b"RIFF"),
+        ("audio/x-wav", b"R"),
+        ("audio/mpeg", b"\xff"),
+        ("audio/flac", b"fLa"),
+        ("audio/mp4", b"\x00" * 7),
+    ],
+)
+def test_truncated_supported_audio_headers_return_sanitized_415(
+    client, mime_type, truncated
+):
+    response = _post(
+        client,
+        content=truncated,
+        content_type=mime_type,
+        headers={"x-internal-key": TEST_KEY},
+    )
+
+    assert response.status_code == 415
+    assert response.json() == {"success": False, "error": "Invalid audio content"}
+
+
 def test_rejects_empty_audio(client):
     response = _post(client, content=b"", headers={"x-internal-key": TEST_KEY})
     assert response.status_code == 400
