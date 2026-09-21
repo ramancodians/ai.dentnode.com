@@ -123,8 +123,11 @@ deployed.
 DentNode calling integration. It requires `x-internal-key` and multipart fields
 `file`, `lab_id`, and `call_id`; it returns exactly `{"transcript": ..., "summary":
 ...}`. Only the explicit audio MIME allowlist in `server.py` is accepted, and
-the upload is bounded by `AUDIO_TO_TEXT_MAX_BYTES`. The route never fetches a
-caller-supplied URL and stores neither audio nor generated text.
+the declared type must match the uploaded container signature. Internal auth
+and `CALL_AUDIO_REQUEST_MAX_BYTES` are enforced before multipart parsing;
+`AUDIO_TO_TEXT_MAX_BYTES` separately caps the audio part. Production Caddy
+also rejects this route above 27 MB. The route never fetches a caller-supplied
+URL and stores neither audio nor generated text.
 
 This service is stateless with respect to call analysis. The app owns durable
 job state and must deduplicate/retry by `call_id`; repeating a request here may

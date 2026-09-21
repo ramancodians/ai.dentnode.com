@@ -9,6 +9,11 @@ ai.dentnode.com {
 		-Server
 	}
 
+	@callAudio path /internal/call-audio/analyze
+	request_body @callAudio {
+		max_size 27MB
+	}
+
 	reverse_proxy __UPSTREAM__ {
 		# Agent responses use NDJSON/SSE-style streaming. Do not buffer them.
 		flush_interval -1

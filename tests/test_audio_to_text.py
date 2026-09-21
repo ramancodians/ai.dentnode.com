@@ -8,6 +8,8 @@ import pytest
 
 from agent.audio_fetch import AudioFetchError, sniff_audio_format, validate_url
 from agent.audio_to_text import (
+    AudioSummaryError,
+    AudioToTextResult,
     UnsupportedAudioFormat,
     _split,
     _validate_format,
@@ -15,6 +17,9 @@ from agent.audio_to_text import (
 )
 from agent.openrouter import ChatResult, OpenRouterError
 from tests.conftest import D10_TEST_KEY, TEST_KEY
+
+
+WAV_BYTES = b"RIFF\x04\x00\x00\x00WAVE"
 
 
 # ── validate_url (Digital Ocean only) ────────────────────────────────────
@@ -154,7 +159,7 @@ async def test_transcribe_audio_preserves_summary_provider_accounting(monkeypatc
     monkeypatch.setattr(audio_to_text, "chat_completion", fake_summary)
 
     result = await transcribe_audio(
-        audio_bytes=b"RIFFaudio", audio_format="wav", summary=True
+        audio_bytes=WAV_BYTES, audio_format="wav", summary=True
     )
 
     assert result.summary_model == "test-summarizer"
@@ -183,7 +188,7 @@ async def test_transcribe_audio_attaches_completed_stt_when_summary_fails(monkey
 
     with pytest.raises(OpenRouterError) as exc_info:
         await transcribe_audio(
-            audio_bytes=b"RIFFaudio", audio_format="wav", summary=True
+            audio_bytes=WAV_BYTES, audio_format="wav", summary=True
         )
 
     partial = exc_info.value.transcription_result
@@ -265,3 +270,90 @@ def test_audio_to_text_accepts_d10_key(stubbed_audio):
     )
     assert resp.status_code == 200
     assert resp.json()["summary"] is None
+
+
+def test_audio_to_text_meters_transcription_and_summary_separately(
+    client, monkeypatch
+):
+    import server
+    from agent.audio_fetch import FetchedAudio
+
+    result = AudioToTextResult(
+        transcript="hello",
+        summary="short",
+        model="test-transcriber",
+        usage={"total_tokens": 12},
+        cost_usd=0.001,
+        latency_ms=9,
+        audio_format="wav",
+        audio_bytes=len(WAV_BYTES),
+        segments=[],
+        summary_model="test-summarizer",
+        summary_usage={"total_tokens": 26},
+        summary_cost_usd=0.002,
+        summary_latency_ms=11,
+    )
+    events = []
+
+    async def fake_fetch(url):
+        return FetchedAudio(url=url, data=WAV_BYTES, format="wav")
+
+    async def fake_transcribe(**_kwargs):
+        return result
+
+    monkeypatch.setattr(server, "fetch_audio", fake_fetch)
+    monkeypatch.setattr(server, "transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(server, "report_usage", lambda **kwargs: events.append(kwargs))
+    monkeypatch.setattr(server, "_fire_and_forget", lambda _coro: None)
+
+    response = client.post(
+        "/audio-to-text", json=_BODY, headers={"x-internal-key": TEST_KEY}
+    )
+
+    assert response.status_code == 200
+    assert [(event["meta"]["stage"], event["cost"]) for event in events] == [
+        ("transcription", 0.001),
+        ("summary", 0.002),
+    ]
+
+
+def test_audio_to_text_meters_completed_transcription_when_summary_fails(
+    client, monkeypatch
+):
+    import server
+    from agent.audio_fetch import FetchedAudio
+
+    partial = AudioToTextResult(
+        transcript="hello",
+        summary=None,
+        model="test-transcriber",
+        usage={"total_tokens": 12},
+        cost_usd=0.001,
+        latency_ms=9,
+        audio_format="wav",
+        audio_bytes=len(WAV_BYTES),
+        segments=[],
+    )
+    events = []
+
+    async def fake_fetch(url):
+        return FetchedAudio(url=url, data=WAV_BYTES, format="wav")
+
+    async def fail_summary(**_kwargs):
+        raise AudioSummaryError(partial)
+
+    monkeypatch.setattr(server, "fetch_audio", fake_fetch)
+    monkeypatch.setattr(server, "transcribe_audio", fail_summary)
+    monkeypatch.setattr(server, "report_usage", lambda **kwargs: events.append(kwargs))
+    monkeypatch.setattr(server, "_fire_and_forget", lambda _coro: None)
+
+    response = client.post(
+        "/audio-to-text", json=_BODY, headers={"x-internal-key": TEST_KEY}
+    )
+
+    assert response.status_code == 502
+    assert [(event["meta"]["stage"], event["status"]) for event in events] == [
+        ("transcription", "ok"),
+        ("summary", "error"),
+    ]
+    assert events[0]["cost"] == 0.001

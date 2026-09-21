@@ -10,6 +10,7 @@ shared x-internal-key or x-internal-id. It is deployed to Cloud Run with --ingre
 
 import asyncio
 import base64
+import hmac
 import json
 import logging
 import time
@@ -21,7 +22,7 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadF
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent.audio_fetch import AudioFetchError, fetch_audio
+from agent.audio_fetch import AudioFetchError, fetch_audio, sniff_audio_format
 from agent.audio_to_text import AudioSummaryError, UnsupportedAudioFormat, transcribe_audio
 from agent.case_from_image import CaseExtractionError, extract_case_from_image
 from agent.config import settings
@@ -67,6 +68,87 @@ logger = logging.getLogger(__name__)
 d10_usage_outbox = UsageOutbox(settings.d10_usage_outbox_path)
 
 
+class CallAudioIngressMiddleware:
+    """Authenticate and cap call-audio requests before multipart parsing.
+
+    FastAPI resolves ``UploadFile`` after Starlette has already spooled every
+    multipart file. This pure ASGI guard runs outside routing, checks the key
+    without consuming the body, then buffers only a bounded sequence of ASGI
+    messages for replay into the multipart parser.
+    """
+
+    _PATH = "/internal/call-audio/analyze"
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("path") != self._PATH:
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        provided = headers.get(b"x-internal-key") or headers.get(b"x-internal-id")
+        expected = settings.internal_key.encode("utf-8")
+        if not expected or not provided or not hmac.compare_digest(provided, expected):
+            response = JSONResponse(
+                status_code=401,
+                content={"success": False, "error": "Invalid internal key"},
+            )
+            await response(scope, receive, send)
+            return
+
+        max_bytes = settings.call_audio_request_max_bytes
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > max_bytes:
+                    response = JSONResponse(
+                        status_code=413,
+                        content={"success": False, "error": "Request body is too large"},
+                    )
+                    await response(scope, receive, send)
+                    return
+            except ValueError:
+                response = JSONResponse(
+                    status_code=400,
+                    content={"success": False, "error": "Invalid Content-Length"},
+                )
+                await response(scope, receive, send)
+                return
+
+        messages = []
+        total = 0
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message.get("type") == "http.request":
+                total += len(message.get("body", b""))
+                if total > max_bytes:
+                    response = JSONResponse(
+                        status_code=413,
+                        content={"success": False, "error": "Request body is too large"},
+                    )
+                    await response(scope, receive, send)
+                    return
+                if not message.get("more_body", False):
+                    break
+            elif message.get("type") == "http.disconnect":
+                break
+
+        message_index = 0
+
+        async def replay_receive():
+            nonlocal message_index
+            if message_index < len(messages):
+                message = messages[message_index]
+                message_index += 1
+                return message
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self.app(scope, replay_receive, send)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     settings.validate()
@@ -97,6 +179,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Laby ADK Agent", version="1.0.0", lifespan=lifespan)
+app.add_middleware(CallAudioIngressMiddleware)
 
 app.include_router(scan_review_router)
 app.include_router(scan_qa_router)
@@ -108,11 +191,11 @@ configure_telemetry(app)
 # or accept application/octet-stream: this route is an internal byte boundary,
 # not a general-purpose file upload.
 CALL_AUDIO_MIME_FORMATS = {
-    "audio/wav": "wav",
-    "audio/x-wav": "wav",
-    "audio/mpeg": "mp3",
-    "audio/flac": "flac",
-    "audio/mp4": "m4a",
+    "audio/wav": frozenset({"wav"}),
+    "audio/x-wav": frozenset({"wav"}),
+    "audio/mpeg": frozenset({"mp3"}),
+    "audio/flac": frozenset({"flac"}),
+    "audio/mp4": frozenset({"m4a", "mp4"}),
 }
 
 
@@ -271,6 +354,92 @@ def _fire_and_forget(coro) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
+def _meter_audio_transcription(
+    *,
+    feature: str,
+    lab_id: str,
+    result,
+    user_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    _fire_and_forget(
+        report_usage(
+            feature=feature,
+            lab_id=lab_id,
+            user_id=user_id,
+            model=result.model,
+            usage=result.usage,
+            cost=result.cost_usd,
+            cost_source="openrouter" if result.cost_usd is not None else "estimated",
+            latency_ms=result.latency_ms,
+            status="ok",
+            request_id=request_id,
+            meta={**(meta or {}), "stage": "transcription"},
+        )
+    )
+
+
+def _meter_audio_summary(
+    *,
+    feature: str,
+    lab_id: str,
+    result,
+    user_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    if result.summary_model is None:
+        return
+    _fire_and_forget(
+        report_usage(
+            feature=feature,
+            lab_id=lab_id,
+            user_id=user_id,
+            model=result.summary_model,
+            usage=result.summary_usage,
+            cost=result.summary_cost_usd,
+            cost_source=(
+                "openrouter" if result.summary_cost_usd is not None else "estimated"
+            ),
+            latency_ms=result.summary_latency_ms,
+            status="ok",
+            request_id=request_id,
+            meta={**(meta or {}), "stage": "summary"},
+        )
+    )
+
+
+def _meter_audio_summary_failure(
+    *,
+    feature: str,
+    lab_id: str,
+    result,
+    user_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    _meter_audio_transcription(
+        feature=feature,
+        lab_id=lab_id,
+        result=result,
+        user_id=user_id,
+        request_id=request_id,
+        meta=meta,
+    )
+    _fire_and_forget(
+        report_usage(
+            feature=feature,
+            lab_id=lab_id,
+            user_id=user_id,
+            model=settings.model,
+            status="error",
+            request_id=request_id,
+            meta={**(meta or {}), "stage": "summary"},
+        )
+    )
+
+
 def _require_internal_key(provided: Optional[str]) -> None:
     if not settings.internal_key:
         raise HTTPException(status_code=500, detail="INTERNAL_API_KEY not configured")
@@ -412,6 +581,10 @@ async def audio_to_text(
         raise HTTPException(status_code=400, detail=str(exc))
 
     lab_id = body.lab_id or PLATFORM_LAB_ID
+    usage_meta = {
+        "audio_bytes": audio.size_bytes,
+        "audio_format": audio.format,
+    }
 
     try:
         result = await transcribe_audio(
@@ -421,6 +594,19 @@ async def audio_to_text(
         )
     except UnsupportedAudioFormat as exc:
         raise HTTPException(status_code=415, detail=str(exc))
+    except AudioSummaryError as exc:
+        _meter_audio_summary_failure(
+            feature="audio_to_text",
+            lab_id=lab_id,
+            user_id=body.user_id,
+            result=exc.transcription_result,
+            meta=usage_meta,
+        )
+        logger.error(
+            "Audio-to-text generation failed",
+            extra={"lab_id": lab_id, "error_type": type(exc).__name__},
+        )
+        raise HTTPException(status_code=502, detail="Audio-to-text model call failed")
     except OpenRouterError as exc:
         logger.error(
             "Audio-to-text generation failed",
@@ -437,23 +623,20 @@ async def audio_to_text(
         )
         raise HTTPException(status_code=502, detail="Audio-to-text model call failed")
 
-    _fire_and_forget(
-        report_usage(
-            feature="audio_to_text",
-            lab_id=lab_id,
-            user_id=body.user_id,
-            model=result.model,
-            usage=result.usage,
-            cost=result.cost_usd,
-            cost_source="openrouter" if result.cost_usd is not None else "estimated",
-            latency_ms=result.latency_ms,
-            status="ok",
-            meta={
-                "audio_bytes": result.audio_bytes,
-                "audio_format": result.audio_format,
-                "speaker_segments": len(result.segments),
-            },
-        )
+    usage_meta["speaker_segments"] = len(result.segments)
+    _meter_audio_transcription(
+        feature="audio_to_text",
+        lab_id=lab_id,
+        user_id=body.user_id,
+        result=result,
+        meta=usage_meta,
+    )
+    _meter_audio_summary(
+        feature="audio_to_text",
+        lab_id=lab_id,
+        user_id=body.user_id,
+        result=result,
+        meta=usage_meta,
     )
 
     return {
@@ -484,8 +667,8 @@ async def analyze_call_audio(
     _require_internal_key(x_internal_key or x_internal_id)
 
     mime_type = (file.content_type or "").split(";", 1)[0].strip().lower()
-    audio_format = CALL_AUDIO_MIME_FORMATS.get(mime_type)
-    if audio_format is None:
+    allowed_formats = CALL_AUDIO_MIME_FORMATS.get(mime_type)
+    if allowed_formats is None:
         raise HTTPException(status_code=415, detail="Unsupported audio type")
 
     audio = await file.read(settings.audio_to_text_max_bytes + 1)
@@ -495,25 +678,17 @@ async def analyze_call_audio(
     if len(audio) > settings.audio_to_text_max_bytes:
         raise HTTPException(status_code=413, detail="Audio file is too large")
 
-    usage_meta = {"audio_bytes": len(audio), "audio_format": audio_format}
-
-    def meter_transcription(result) -> None:
-        _fire_and_forget(
-            report_usage(
-                feature="call_audio_analysis",
-                lab_id=lab_id,
-                model=result.model,
-                usage=result.usage,
-                cost=result.cost_usd,
-                cost_source=(
-                    "openrouter" if result.cost_usd is not None else "estimated"
-                ),
-                latency_ms=result.latency_ms,
-                status="ok",
-                request_id=call_id,
-                meta={**usage_meta, "stage": "transcription"},
-            )
+    try:
+        audio_format = sniff_audio_format(audio, "", mime_type)
+    except AudioFetchError:
+        raise HTTPException(status_code=415, detail="Invalid audio content")
+    if audio_format not in allowed_formats:
+        raise HTTPException(
+            status_code=415,
+            detail="Audio content does not match declared type",
         )
+
+    usage_meta = {"audio_bytes": len(audio), "audio_format": audio_format}
 
     try:
         result = await transcribe_audio(
@@ -522,16 +697,12 @@ async def analyze_call_audio(
             summary=True,
         )
     except AudioSummaryError as exc:
-        meter_transcription(exc.transcription_result)
-        _fire_and_forget(
-            report_usage(
-                feature="call_audio_analysis",
-                lab_id=lab_id,
-                model=settings.model,
-                status="error",
-                request_id=call_id,
-                meta={**usage_meta, "stage": "summary"},
-            )
+        _meter_audio_summary_failure(
+            feature="call_audio_analysis",
+            lab_id=lab_id,
+            result=exc.transcription_result,
+            request_id=call_id,
+            meta=usage_meta,
         )
         logger.error(
             "Call audio analysis failed",
@@ -555,26 +726,20 @@ async def analyze_call_audio(
         )
         raise HTTPException(status_code=502, detail="Call audio analysis failed")
 
-    meter_transcription(result)
-    if result.summary_model is not None:
-        _fire_and_forget(
-            report_usage(
-                feature="call_audio_analysis",
-                lab_id=lab_id,
-                model=result.summary_model,
-                usage=result.summary_usage,
-                cost=result.summary_cost_usd,
-                cost_source=(
-                    "openrouter"
-                    if result.summary_cost_usd is not None
-                    else "estimated"
-                ),
-                latency_ms=result.summary_latency_ms,
-                status="ok",
-                request_id=call_id,
-                meta={**usage_meta, "stage": "summary"},
-            )
-        )
+    _meter_audio_transcription(
+        feature="call_audio_analysis",
+        lab_id=lab_id,
+        result=result,
+        request_id=call_id,
+        meta=usage_meta,
+    )
+    _meter_audio_summary(
+        feature="call_audio_analysis",
+        lab_id=lab_id,
+        result=result,
+        request_id=call_id,
+        meta=usage_meta,
+    )
 
     return {"transcript": result.transcript, "summary": result.summary}
 

@@ -124,6 +124,11 @@ class Settings:
     )
     audio_to_text_timeout_secs: int = _int("AUDIO_TO_TEXT_TIMEOUT_SECS", 120)
     audio_to_text_max_bytes: int = _int("AUDIO_TO_TEXT_MAX_BYTES", 25 * 1024 * 1024)
+    # Total multipart request cap. It is intentionally larger than the audio
+    # payload cap to leave room for boundaries and the two short form fields.
+    call_audio_request_max_bytes: int = _int(
+        "CALL_AUDIO_REQUEST_MAX_BYTES", audio_to_text_max_bytes + 1024 * 1024
+    )
     audio_to_text_fetch_timeout_secs: int = _int(
         "AUDIO_TO_TEXT_FETCH_TIMEOUT_SECS", 30
     )
@@ -224,6 +229,12 @@ class Settings:
                 "AUDIO_TO_TEXT_MAX_BYTES must be 1–100 MiB, got "
                 f"{self.audio_to_text_max_bytes}"
             )
+        if self.call_audio_request_max_bytes <= self.audio_to_text_max_bytes:
+            raise RuntimeError(
+                "CALL_AUDIO_REQUEST_MAX_BYTES must exceed AUDIO_TO_TEXT_MAX_BYTES"
+            )
+        if self.call_audio_request_max_bytes > 101 * 1024 * 1024:
+            raise RuntimeError("CALL_AUDIO_REQUEST_MAX_BYTES must not exceed 101 MiB")
         if self.audio_to_text_fetch_timeout_secs < 1:
             raise RuntimeError(
                 "AUDIO_TO_TEXT_FETCH_TIMEOUT_SECS must be at least 1"
