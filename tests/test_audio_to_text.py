@@ -2,11 +2,18 @@
 
 import io
 import wave
+from types import SimpleNamespace
 
 import pytest
 
 from agent.audio_fetch import AudioFetchError, sniff_audio_format, validate_url
-from agent.audio_to_text import UnsupportedAudioFormat, _split, _validate_format
+from agent.audio_to_text import (
+    UnsupportedAudioFormat,
+    _split,
+    _validate_format,
+    transcribe_audio,
+)
+from agent.openrouter import ChatResult, OpenRouterError
 from tests.conftest import D10_TEST_KEY, TEST_KEY
 
 
@@ -107,6 +114,83 @@ def test_validate_format_rejects_webm():
 
 def test_validate_format_passes_mp3():
     assert _validate_format("mp3") == "mp3"
+
+
+def _transcription_response():
+    return SimpleNamespace(
+        status_code=200,
+        json=lambda: {
+            "text": "Caller asked about the crown.",
+            "model": "test-transcriber",
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "total_tokens": 12,
+                "cost": 0.001,
+            },
+            "segments": [],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_preserves_summary_provider_accounting(monkeypatch):
+    import agent.audio_to_text as audio_to_text
+
+    async def fake_post(*_args, **_kwargs):
+        return _transcription_response()
+
+    async def fake_summary(**_kwargs):
+        return ChatResult(
+            text="Crown discussed.",
+            model="test-summarizer",
+            usage={"prompt_tokens": 21, "completion_tokens": 5, "total_tokens": 26},
+            cost_usd=0.002,
+            latency_ms=11,
+        )
+
+    monkeypatch.setattr(audio_to_text.settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(audio_to_text.httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(audio_to_text, "chat_completion", fake_summary)
+
+    result = await transcribe_audio(
+        audio_bytes=b"RIFFaudio", audio_format="wav", summary=True
+    )
+
+    assert result.summary_model == "test-summarizer"
+    assert result.summary_usage == {
+        "prompt_tokens": 21,
+        "completion_tokens": 5,
+        "total_tokens": 26,
+    }
+    assert result.summary_cost_usd == 0.002
+    assert result.summary_latency_ms == 11
+
+
+@pytest.mark.asyncio
+async def test_transcribe_audio_attaches_completed_stt_when_summary_fails(monkeypatch):
+    import agent.audio_to_text as audio_to_text
+
+    async def fake_post(*_args, **_kwargs):
+        return _transcription_response()
+
+    async def fail_summary(**_kwargs):
+        raise OpenRouterError("summary failed")
+
+    monkeypatch.setattr(audio_to_text.settings, "openrouter_api_key", "test-key")
+    monkeypatch.setattr(audio_to_text.httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(audio_to_text, "chat_completion", fail_summary)
+
+    with pytest.raises(OpenRouterError) as exc_info:
+        await transcribe_audio(
+            audio_bytes=b"RIFFaudio", audio_format="wav", summary=True
+        )
+
+    partial = exc_info.value.transcription_result
+    assert partial.model == "test-transcriber"
+    assert partial.usage["total_tokens"] == 12
+    assert partial.cost_usd == 0.001
+    assert partial.summary is None
 
 
 # ── endpoint (shared auth + DO-only) ─────────────────────────────────────

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.audio_to_text import AudioToTextResult
+from agent.audio_to_text import AudioSummaryError, AudioToTextResult
 from agent.openrouter import OpenRouterError
 from tests.conftest import TEST_KEY
 
@@ -21,6 +21,19 @@ def _result(*, transcript="Caller asked about the crown.", summary="Crown discus
         audio_bytes=12,
         segments=[],
     )
+
+
+def _result_with_summary_usage():
+    result = _result()
+    result.summary_model = "test-summarizer"
+    result.summary_usage = {
+        "prompt_tokens": 21,
+        "completion_tokens": 5,
+        "total_tokens": 26,
+    }
+    result.summary_cost_usd = 0.002
+    result.summary_latency_ms = 11
+    return result
 
 
 @pytest.fixture
@@ -145,6 +158,72 @@ def test_reports_usage_with_lab_and_call_id(stubbed_analysis, monkeypatch):
     assert calls.usage[0]["lab_id"] == "lab-123"
     assert calls.usage[0]["request_id"] == "call-456"
     assert calls.usage[0]["feature"] == "call_audio_analysis"
+
+
+def test_reports_transcription_and_summary_usage_with_lab_and_call_id(
+    client, monkeypatch
+):
+    import server
+
+    calls = []
+
+    async def fake_transcribe(**_kwargs):
+        return _result_with_summary_usage()
+
+    monkeypatch.setattr(server, "transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(server, "report_usage", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(server, "_fire_and_forget", lambda _coro: None)
+
+    response = _post(client, headers={"x-internal-key": TEST_KEY})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "transcript": "Caller asked about the crown.",
+        "summary": "Crown discussed.",
+    }
+    assert [event["meta"]["stage"] for event in calls] == [
+        "transcription",
+        "summary",
+    ]
+    assert [event["model"] for event in calls] == [
+        "test-transcriber",
+        "test-summarizer",
+    ]
+    assert [event["usage"] for event in calls] == [
+        {"total_tokens": 12},
+        {"prompt_tokens": 21, "completion_tokens": 5, "total_tokens": 26},
+    ]
+    assert [event["cost"] for event in calls] == [0.001, 0.002]
+    assert all(event["lab_id"] == "lab-123" for event in calls)
+    assert all(event["request_id"] == "call-456" for event in calls)
+
+
+def test_preserves_transcription_metering_when_summary_fails(client, monkeypatch):
+    import server
+
+    calls = []
+    error = AudioSummaryError(_result(summary=None))
+
+    async def fail_summary(**_kwargs):
+        raise error
+
+    monkeypatch.setattr(server, "transcribe_audio", fail_summary)
+    monkeypatch.setattr(server, "report_usage", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(server, "_fire_and_forget", lambda _coro: None)
+
+    response = _post(client, headers={"x-internal-key": TEST_KEY})
+
+    assert response.status_code == 502
+    assert [(event["meta"]["stage"], event["status"]) for event in calls] == [
+        ("transcription", "ok"),
+        ("summary", "error"),
+    ]
+    assert calls[0]["model"] == "test-transcriber"
+    assert calls[0]["usage"] == {"total_tokens": 12}
+    assert calls[0]["cost"] == 0.001
+    assert calls[1]["model"] == server.settings.model
+    assert all(event["lab_id"] == "lab-123" for event in calls)
+    assert all(event["request_id"] == "call-456" for event in calls)
 
 
 def test_accepts_existing_internal_id_header_alias(stubbed_analysis):

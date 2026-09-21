@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent.audio_fetch import AudioFetchError, fetch_audio
-from agent.audio_to_text import UnsupportedAudioFormat, transcribe_audio
+from agent.audio_to_text import AudioSummaryError, UnsupportedAudioFormat, transcribe_audio
 from agent.case_from_image import CaseExtractionError, extract_case_from_image
 from agent.config import settings
 from agent.insights import generate_insights
@@ -495,12 +495,49 @@ async def analyze_call_audio(
     if len(audio) > settings.audio_to_text_max_bytes:
         raise HTTPException(status_code=413, detail="Audio file is too large")
 
+    usage_meta = {"audio_bytes": len(audio), "audio_format": audio_format}
+
+    def meter_transcription(result) -> None:
+        _fire_and_forget(
+            report_usage(
+                feature="call_audio_analysis",
+                lab_id=lab_id,
+                model=result.model,
+                usage=result.usage,
+                cost=result.cost_usd,
+                cost_source=(
+                    "openrouter" if result.cost_usd is not None else "estimated"
+                ),
+                latency_ms=result.latency_ms,
+                status="ok",
+                request_id=call_id,
+                meta={**usage_meta, "stage": "transcription"},
+            )
+        )
+
     try:
         result = await transcribe_audio(
             audio_bytes=audio,
             audio_format=audio_format,
             summary=True,
         )
+    except AudioSummaryError as exc:
+        meter_transcription(exc.transcription_result)
+        _fire_and_forget(
+            report_usage(
+                feature="call_audio_analysis",
+                lab_id=lab_id,
+                model=settings.model,
+                status="error",
+                request_id=call_id,
+                meta={**usage_meta, "stage": "summary"},
+            )
+        )
+        logger.error(
+            "Call audio analysis failed",
+            extra={"lab_id": lab_id, "error_type": type(exc).__name__},
+        )
+        raise HTTPException(status_code=502, detail="Call audio analysis failed")
     except Exception as exc:  # provider errors must never expose call content
         logger.error(
             "Call audio analysis failed",
@@ -513,25 +550,31 @@ async def analyze_call_audio(
                 model=settings.audio_to_text_model,
                 status="error",
                 request_id=call_id,
-                meta={"audio_bytes": len(audio), "audio_format": audio_format},
+                meta={**usage_meta, "stage": "transcription"},
             )
         )
         raise HTTPException(status_code=502, detail="Call audio analysis failed")
 
-    _fire_and_forget(
-        report_usage(
-            feature="call_audio_analysis",
-            lab_id=lab_id,
-            model=result.model,
-            usage=result.usage,
-            cost=result.cost_usd,
-            cost_source="openrouter" if result.cost_usd is not None else "estimated",
-            latency_ms=result.latency_ms,
-            status="ok",
-            request_id=call_id,
-            meta={"audio_bytes": len(audio), "audio_format": audio_format},
+    meter_transcription(result)
+    if result.summary_model is not None:
+        _fire_and_forget(
+            report_usage(
+                feature="call_audio_analysis",
+                lab_id=lab_id,
+                model=result.summary_model,
+                usage=result.summary_usage,
+                cost=result.summary_cost_usd,
+                cost_source=(
+                    "openrouter"
+                    if result.summary_cost_usd is not None
+                    else "estimated"
+                ),
+                latency_ms=result.summary_latency_ms,
+                status="ok",
+                request_id=call_id,
+                meta={**usage_meta, "stage": "summary"},
+            )
         )
-    )
 
     return {"transcript": result.transcript, "summary": result.summary}
 

@@ -44,6 +44,18 @@ class AudioToTextResult:
     audio_format: str
     audio_bytes: int
     segments: List[Dict[str, Any]]
+    summary_model: Optional[str] = None
+    summary_usage: Optional[Dict[str, Any]] = None
+    summary_cost_usd: Optional[float] = None
+    summary_latency_ms: Optional[int] = None
+
+
+class AudioSummaryError(OpenRouterError):
+    """Summary failed after a billable transcription completed successfully."""
+
+    def __init__(self, transcription_result: AudioToTextResult):
+        super().__init__("Audio summary generation failed")
+        self.transcription_result = transcription_result
 
 
 def _prompt(summary: bool) -> str:
@@ -135,24 +147,9 @@ async def transcribe_audio(
         pass
     segments = [segment for segment in (data.get("segments") or []) if isinstance(segment, dict)]
 
-    summary_text: Optional[str] = None
-    if summary:
-        summary_result = await chat_completion(
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Summarise this dental visit transcript in 2-3 concise sentences. "
-                    "Do not add facts that are not in the transcript.\n\n" + transcript
-                ),
-            }],
-            model=settings.model,
-            temperature=0.1,
-            timeout_secs=settings.audio_to_text_timeout_secs,
-        )
-        summary_text = summary_result.text.strip() or None
-    return AudioToTextResult(
+    result = AudioToTextResult(
         transcript=transcript,
-        summary=summary_text if summary else None,
+        summary=None,
         model=str(data.get("model") or body["model"]),
         usage=_extract_usage(raw_usage),
         cost_usd=cost_usd,
@@ -161,3 +158,26 @@ async def transcribe_audio(
         audio_bytes=len(audio_bytes),
         segments=segments,
     )
+
+    if summary:
+        try:
+            summary_result = await chat_completion(
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Summarise this dental visit transcript in 2-3 concise sentences. "
+                        "Do not add facts that are not in the transcript.\n\n" + transcript
+                    ),
+                }],
+                model=settings.model,
+                temperature=0.1,
+                timeout_secs=settings.audio_to_text_timeout_secs,
+            )
+        except OpenRouterError as exc:
+            raise AudioSummaryError(result) from exc
+        result.summary = summary_result.text.strip() or None
+        result.summary_model = summary_result.model
+        result.summary_usage = summary_result.usage
+        result.summary_cost_usd = summary_result.cost_usd
+        result.summary_latency_ms = summary_result.latency_ms
+    return result
