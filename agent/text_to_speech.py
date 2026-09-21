@@ -260,12 +260,12 @@ class SpeechStream:
                     headers=headers,
                 )
             )
-        except httpx.HTTPError as exc:
+        except httpx.HTTPError:
             await self._stack.aclose()
             raise OpenRouterError(
                 "OpenRouter speech request failed",
                 code="transport_error",
-            ) from exc
+            ) from None
 
         if response.status_code >= 400:
             await response.aread()
@@ -332,16 +332,16 @@ class SpeechStream:
                         # this return too, and doing both double-counted it.
                         try:
                             return base64.b64decode(data)
-                        except (ValueError, TypeError) as exc:
+                        except (ValueError, TypeError):
                             raise OpenRouterError(
                                 "OpenRouter returned an undecodable audio chunk",
                                 code="invalid_audio_chunk",
-                            ) from exc
-        except httpx.HTTPError as exc:
+                            ) from None
+        except httpx.HTTPError:
             raise OpenRouterError(
                 "OpenRouter speech stream failed",
                 code="stream_transport_error",
-            ) from exc
+            ) from None
         finally:
             self.meta.transcript += "".join(transcript)
         return None

@@ -1,8 +1,10 @@
 """Provider-native usage fields retained by the OpenRouter primitive."""
 
+import io
 import logging
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import respx
 from httpx import Response
@@ -125,3 +127,41 @@ def test_chat_completion_provider_body_never_reaches_endpoint_logs(
         f"{record.getMessage()} {record.__dict__!r}" for record in records
     )
     assert secret not in rendered_logs
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_transport_error_traceback_is_sanitized(monkeypatch):
+    secret = "SECRET_TRANSPORT_URL_MARKER"
+
+    async def fail_post(*_args, **_kwargs):
+        raise httpx.ConnectError(
+            f"failed to connect to https://user:{secret}@provider.invalid"
+        )
+
+    monkeypatch.setattr("agent.openrouter.httpx.AsyncClient.post", fail_post)
+
+    log_stream = io.StringIO()
+    handler = logging.StreamHandler(log_stream)
+    logger = logging.getLogger("tests.openrouter.transport")
+    original_level = logger.level
+    original_propagate = logger.propagate
+    logger.setLevel(logging.ERROR)
+    logger.propagate = False
+    logger.addHandler(handler)
+    try:
+        with pytest.raises(OpenRouterError) as exc_info:
+            try:
+                await chat_completion(
+                    messages=[{"role": "user", "content": "hello"}],
+                    model="openrouter/google/gemini-test",
+                )
+            except OpenRouterError:
+                logger.exception("OpenRouter transport request failed")
+                raise
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(original_level)
+        logger.propagate = original_propagate
+
+    assert exc_info.value.code == "transport_error"
+    assert secret not in log_stream.getvalue()

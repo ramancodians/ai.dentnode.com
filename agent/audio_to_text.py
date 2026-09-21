@@ -126,11 +126,11 @@ async def transcribe_audio(
                 json=body,
                 headers=headers,
             )
-    except httpx.HTTPError as exc:
+    except httpx.HTTPError:
         raise OpenRouterError(
             "OpenRouter transcription failed",
             code="transport_error",
-        ) from exc
+        ) from None
     latency_ms = int((time.monotonic() - t0) * 1000)
     if response.status_code >= 400:
         raise OpenRouterError(
@@ -140,12 +140,12 @@ async def transcribe_audio(
         )
     try:
         data = response.json()
-    except ValueError as exc:
+    except ValueError:
         raise OpenRouterError(
             "OpenRouter transcription returned an invalid response",
             code="invalid_response",
             status_code=response.status_code,
-        ) from exc
+        ) from None
 
     transcript = str(data.get("text") or "").strip()
     if not transcript:

@@ -185,11 +185,11 @@ async def chat_completion(
     try:
         async with httpx.AsyncClient(timeout=timeout_secs) as client:
             resp = await client.post(url, json=body, headers=headers)
-    except httpx.HTTPError as exc:
+    except httpx.HTTPError:
         raise OpenRouterError(
             "OpenRouter request failed",
             code="transport_error",
-        ) from exc
+        ) from None
 
     latency_ms = int((time.monotonic() - t0) * 1000)
 
@@ -202,12 +202,12 @@ async def chat_completion(
 
     try:
         data = resp.json()
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         raise OpenRouterError(
             "OpenRouter returned an invalid response",
             code="invalid_response",
             status_code=resp.status_code,
-        ) from exc
+        ) from None
 
     choices = data.get("choices") or []
     if not choices:
