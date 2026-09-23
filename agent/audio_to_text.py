@@ -44,6 +44,18 @@ class AudioToTextResult:
     audio_format: str
     audio_bytes: int
     segments: List[Dict[str, Any]]
+    summary_model: Optional[str] = None
+    summary_usage: Optional[Dict[str, Any]] = None
+    summary_cost_usd: Optional[float] = None
+    summary_latency_ms: Optional[int] = None
+
+
+class AudioSummaryError(OpenRouterError):
+    """Summary failed after a billable transcription completed successfully."""
+
+    def __init__(self, transcription_result: AudioToTextResult):
+        super().__init__("Audio summary generation failed")
+        self.transcription_result = transcription_result
 
 
 def _prompt(summary: bool) -> str:
@@ -83,7 +95,10 @@ async def transcribe_audio(
     b64 = base64.b64encode(audio_bytes).decode()
 
     if not settings.openrouter_api_key:
-        raise OpenRouterError("OPENROUTER_API_KEY is not configured")
+        raise OpenRouterError(
+            "OpenRouter transcription is not configured",
+            code="not_configured",
+        )
 
     # Use OpenRouter's purpose-built STT endpoint rather than Chat Completions.
     # `microsoft/mai-transcribe-2` exposes Azure's diarization capability through
@@ -111,21 +126,33 @@ async def transcribe_audio(
                 json=body,
                 headers=headers,
             )
-    except httpx.HTTPError as exc:
-        raise OpenRouterError(f"OpenRouter transcription request failed: {exc}") from exc
+    except httpx.HTTPError:
+        raise OpenRouterError(
+            "OpenRouter transcription failed",
+            code="transport_error",
+        ) from None
     latency_ms = int((time.monotonic() - t0) * 1000)
     if response.status_code >= 400:
         raise OpenRouterError(
-            f"OpenRouter transcription returned {response.status_code}: {response.text[:300]}"
+            "OpenRouter transcription failed",
+            code="provider_http_error",
+            status_code=response.status_code,
         )
     try:
         data = response.json()
-    except ValueError as exc:
-        raise OpenRouterError("OpenRouter transcription returned non-JSON") from exc
+    except ValueError:
+        raise OpenRouterError(
+            "OpenRouter transcription returned an invalid response",
+            code="invalid_response",
+            status_code=response.status_code,
+        ) from None
 
     transcript = str(data.get("text") or "").strip()
     if not transcript:
-        raise OpenRouterError("OpenRouter transcription returned an empty transcript")
+        raise OpenRouterError(
+            "OpenRouter transcription returned an empty transcript",
+            code="empty_transcript",
+        )
     raw_usage = data.get("usage") or {}
     cost_usd: Optional[float] = None
     try:
@@ -135,24 +162,9 @@ async def transcribe_audio(
         pass
     segments = [segment for segment in (data.get("segments") or []) if isinstance(segment, dict)]
 
-    summary_text: Optional[str] = None
-    if summary:
-        summary_result = await chat_completion(
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Summarise this dental visit transcript in 2-3 concise sentences. "
-                    "Do not add facts that are not in the transcript.\n\n" + transcript
-                ),
-            }],
-            model=settings.model,
-            temperature=0.1,
-            timeout_secs=settings.audio_to_text_timeout_secs,
-        )
-        summary_text = summary_result.text.strip() or None
-    return AudioToTextResult(
+    result = AudioToTextResult(
         transcript=transcript,
-        summary=summary_text if summary else None,
+        summary=None,
         model=str(data.get("model") or body["model"]),
         usage=_extract_usage(raw_usage),
         cost_usd=cost_usd,
@@ -161,3 +173,26 @@ async def transcribe_audio(
         audio_bytes=len(audio_bytes),
         segments=segments,
     )
+
+    if summary:
+        try:
+            summary_result = await chat_completion(
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Summarise this dental visit transcript in 2-3 concise sentences. "
+                        "Do not add facts that are not in the transcript.\n\n" + transcript
+                    ),
+                }],
+                model=settings.model,
+                temperature=0.1,
+                timeout_secs=settings.audio_to_text_timeout_secs,
+            )
+        except OpenRouterError as exc:
+            raise AudioSummaryError(result) from exc
+        result.summary = summary_result.text.strip() or None
+        result.summary_model = summary_result.model
+        result.summary_usage = summary_result.usage
+        result.summary_cost_usd = summary_result.cost_usd
+        result.summary_latency_ms = summary_result.latency_ms
+    return result

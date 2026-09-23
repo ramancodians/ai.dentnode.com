@@ -213,7 +213,10 @@ class SpeechStream:
 
     async def open(self) -> "SpeechStream":
         if not settings.openrouter_api_key:
-            raise OpenRouterError("OPENROUTER_API_KEY is not configured")
+            raise OpenRouterError(
+                "OpenRouter speech is not configured",
+                code="not_configured",
+            )
 
         body: Dict[str, Any] = {
             "model": self.meta.model,
@@ -257,15 +260,20 @@ class SpeechStream:
                     headers=headers,
                 )
             )
-        except httpx.HTTPError as exc:
-            await self._stack.aclose()
-            raise OpenRouterError(f"OpenRouter speech request failed: {exc}") from exc
-
-        if response.status_code >= 400:
-            detail = (await response.aread()).decode("utf-8", "replace")[:300]
+        except httpx.HTTPError:
             await self._stack.aclose()
             raise OpenRouterError(
-                f"OpenRouter returned {response.status_code}: {detail}"
+                "OpenRouter speech request failed",
+                code="transport_error",
+            ) from None
+
+        if response.status_code >= 400:
+            await response.aread()
+            await self._stack.aclose()
+            raise OpenRouterError(
+                "OpenRouter speech request failed",
+                code="provider_http_error",
+                status_code=response.status_code,
             )
 
         self._lines = response.aiter_lines()
@@ -279,7 +287,10 @@ class SpeechStream:
             raise
         if self._first_pcm is None:
             await self._stack.aclose()
-            raise OpenRouterError("OpenRouter returned no audio for this text")
+            raise OpenRouterError(
+                "OpenRouter returned no audio for this text",
+                code="missing_audio",
+            )
         self.meta.ttfb_ms = int((time.monotonic() - self._t0) * 1000)
         self._opened = True
         return self
@@ -321,12 +332,16 @@ class SpeechStream:
                         # this return too, and doing both double-counted it.
                         try:
                             return base64.b64decode(data)
-                        except (ValueError, TypeError) as exc:
+                        except (ValueError, TypeError):
                             raise OpenRouterError(
-                                "OpenRouter returned an undecodable audio chunk"
-                            ) from exc
-        except httpx.HTTPError as exc:
-            raise OpenRouterError(f"OpenRouter speech stream failed: {exc}") from exc
+                                "OpenRouter returned an undecodable audio chunk",
+                                code="invalid_audio_chunk",
+                            ) from None
+        except httpx.HTTPError:
+            raise OpenRouterError(
+                "OpenRouter speech stream failed",
+                code="stream_transport_error",
+            ) from None
         finally:
             self.meta.transcript += "".join(transcript)
         return None

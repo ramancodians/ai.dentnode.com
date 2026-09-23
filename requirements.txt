@@ -7,6 +7,8 @@ uvicorn[standard]>=0.30.0
 httpx>=0.27.0
 pydantic>=2.7.0
 python-dotenv>=1.0.0
+# Required by FastAPI for the internal multipart call-recording upload.
+python-multipart>=0.0.20,<1.0.0
 
 # Production tracing. The SDK/exporter release and contrib instrumentation
 # release are the matching OpenTelemetry set. Instrumentation is configured

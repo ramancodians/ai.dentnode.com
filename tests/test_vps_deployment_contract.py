@@ -67,3 +67,16 @@ def test_production_image_runs_nonroot_and_has_an_internal_healthcheck():
     assert "HEALTHCHECK" in dockerfile
     assert "http://127.0.0.1:" in dockerfile
     assert "install -d -o laby -g laby -m 0700 /var/lib/dentnode-ai" in dockerfile
+
+
+def test_caddy_caps_call_audio_body_before_reverse_proxying():
+    caddy = (ROOT / "deploy/vps/caddy-site.template").read_text()
+    runtime_env = (ROOT / "deploy/vps/env/runtime.env.example").read_text()
+
+    assert "@callAudio path /internal/call-audio/analyze" in caddy
+    assert re.search(
+        r"request_body\s+@callAudio\s*\{\s*max_size\s+27MB\s*\}",
+        caddy,
+        flags=re.MULTILINE,
+    )
+    assert "CALL_AUDIO_REQUEST_MAX_BYTES=27000000" in runtime_env
