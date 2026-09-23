@@ -13,7 +13,10 @@ from typing import Any, Dict, List, Optional
 
 from google.adk.tools import ToolContext
 
+from .jev import JEV_MODEL, JevError
+from .jev_search import suggest_search_match, with_search_suggestion
 from .node_client import NodeToolError, call_tool
+from .usage import report_usage
 
 
 def _lab_id(tool_context: ToolContext) -> str:
@@ -52,7 +55,37 @@ def _range_params(
 
 async def _run(tool_context: ToolContext, name: str, params: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        return await call_tool(name, _lab_id(tool_context), params, user_id=_user_id(tool_context))
+        lab_id = _lab_id(tool_context)
+        user_id = _user_id(tool_context)
+        result = await call_tool(name, lab_id, params, user_id=user_id)
+        if name in {"find_case", "find_doctor", "staff_list"}:
+            try:
+                suggestion = await suggest_search_match(name, params.get("query"), result)
+            except JevError:
+                await report_usage(
+                    feature="jev_text_match", lab_id=lab_id, user_id=user_id,
+                    model=JEV_MODEL, cost=0.0, status="error",
+                    meta={"tool": name},
+                )
+            else:
+                if suggestion is not None:
+                    decision = suggestion.decision
+                    await report_usage(
+                        feature="jev_text_match", lab_id=lab_id, user_id=user_id,
+                        model=decision.model,
+                        usage={
+                            "prompt_tokens": decision.input_tokens,
+                            "completion_tokens": decision.output_tokens,
+                            "total_tokens": decision.input_tokens + decision.output_tokens,
+                        },
+                        cost=decision.cost_usd,
+                        cost_source="openrouter" if decision.cost_usd is not None else "estimated",
+                        latency_ms=decision.latency_ms,
+                        request_id=decision.request_id,
+                        meta={"tool": name},
+                    )
+                    result = with_search_suggestion(result, suggestion)
+        return result
     except NodeToolError as exc:
         # Returned to the model as a normal result so it can apologise/retry
         # rather than crashing the turn.

@@ -13,3 +13,11 @@
 # ai.dentnode.com
 
 This repository owns the Python Laby/AI service now hosted on the DentNode VPS. Keep the service stateless with respect to DentNode tenant data, preserve internal-key boundaries, keep model calls metered, and use the VPS deployment contract. Cloud Run files are historical only and must not be reintroduced as a normal deployment path.
+
+## Shared Jev decision agent
+
+Read `docs/jev-decision-agent.md` and the workspace's `knowledge/architecture/Jev Decision Architecture.md` before changing AI model routing or text matching. Jev is the first model to consider for bounded, non-generative semantic decisions shared across Laby and D10: intent routing, classification, and ranking candidates that a tenant-scoped tool has already retrieved. Ask narrow typed `choice`, `score`, or `noul` questions through OpenRouter's System One API; Jev is not a Chat Completions text-generation model. Keep this decision capability reusable rather than embedding it in one feature workflow.
+
+Use ordinary code and database queries for exact IDs, dates, numbers, authorization, and tenant filtering. The authoritative patient/case/doctor search remains in the app or D10 backend; Jev may help choose among its bounded results but must not invent an identity, expand the search scope, or turn an ambiguous patient match into an automatic action. Preserve the existing user-choice and explicit-confirmation gates for patient calls and other side effects.
+
+Use DeepSeek when a task needs generated text or tool-calling conversation, or when a bounded decision cannot be completed by Jev and a fallback is appropriate. Keep vision, transcription, and speech on capable modality-specific models. Meter each model request and compare observed cost, latency, and quality before claiming savings. Send only the minimum tenant-scoped candidate fields needed for a decision; patient information sent through OpenRouter is external processing and must follow the existing privacy and access rules.
