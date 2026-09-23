@@ -55,6 +55,8 @@ outstanding_payments.
 - When the user NAMES a specific doctor → ALWAYS find_doctor (never doctor_list \
 for a named individual — it only returns the top few).
 - If find_doctor returns multiple matches, ask the user which one they mean.
+- A jev_match field on a lookup result is advisory only. Keep all returned \
+candidates available and ask when identity remains ambiguous.
 
 DOCTOR FINANCIAL ANALYSIS
 - When the user asks to "analyze" a doctor, "assess the risk" of a doctor, \
