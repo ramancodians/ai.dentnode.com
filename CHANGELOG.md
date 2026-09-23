@@ -446,3 +446,6 @@ caller exists yet; nothing invokes the endpoint in production.
 - Cost note: scan review now sends ~12 full-size images instead of 1 composited tile, so its per-call cost rises. `AiUsageEvent.meta.views` records the image count per call.
 
 **Status:** pushed to `main`; **not yet deployed** — blocked on the Secret Manager entry above.
+# 2026-09-23
+
+- Added an internal, bounded text reply endpoint for Calling Service's turn-based recorded AI phone conversations. It uses the existing OpenRouter model, commits each voice-model usage event to the D10 retrying outbox, and keeps clinic call state in Calling Service. A dedicated `CALLING_VOICE_INTERNAL_KEY` is optional at startup and must match Calling Service's `VOICE_AGENT_API_KEY` to enable the feature.

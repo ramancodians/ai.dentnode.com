@@ -91,6 +91,7 @@ class Settings:
     # back to INTERNAL_API_KEY during the migration, but production should set
     # D10_INTERNAL_KEY explicitly.
     d10_internal_key: str = _get("D10_INTERNAL_KEY", "") or internal_key
+    calling_voice_internal_key: str = _get("CALLING_VOICE_INTERNAL_KEY", "")
     d10_internal_base_url: str = _get(
         "D10_INTERNAL_BASE_URL", "http://localhost:3000/api"
     ).rstrip("/")
