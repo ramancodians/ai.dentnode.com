@@ -50,3 +50,11 @@ networkx>=3.0
 # imports tzdata": nothing does, and that is exactly the point.
 tzdata>=2025.1
 
+
+# Real-time voice agent (voice_call/worker.py, run as its own process) and the
+# LiveKit room tokens Voice Lab mints. Pinned exactly: the Agents API moved
+# between minor releases (turn_handling replaced the old endpointing kwargs in
+# 1.8). The [openai] extra is the OpenAI-compatible client pointed at OpenRouter,
+# not an OpenAI key. STT/TTS/turn detection are LiveKit Inference (no local models
+# beyond the bundled Silero VAD).
+livekit-agents[openai]==1.8.3

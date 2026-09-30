@@ -1,9 +1,120 @@
 # Changelog
 
+## [Unreleased] — Jev reception tool selection (2026-10-01)
+
+- Added optional `/reception/tools/select`: bounded Jev task-family selection
+  shortlists available tools without generating arguments or executing actions.
+- Preserves prerequisites and unmapped tools; ambiguous/failed decisions retain
+  the full catalog. Meters each attempt through existing app/D10 usage paths.
+- Four offline selection-boundary checks pass. Savings and live integration
+  remain unmeasured; consumers must opt into the new route.
+
+## [Unreleased] — Shared reception tool gateway (2026-10-01)
+
+- Added authenticated `/reception/tools/catalog` and `/reception/tools/execute`
+  for D10 and app capabilities with separate trusted identity context.
+- Reuses authoritative backend tools and confirmation rules. Execution is not
+  retried automatically after an ambiguous network/backend failure.
+- Added integration contract and requirement ownership map in docs/reception-tools.md.
+
 All notable changes to the Laby ADK agent service (`ai.dentnode.com`).
 
 Newest first. Each entry records what changed, plus anything that must be true in
 the environment for it to run. Production is deployed to the DentNode VPS by CI.
+
+## [Unreleased] — Per-clinic AI cost to D10 (feature labels, speech/voice/phone units)
+
+- **Clinic AI prices live here**, in `agent/d10/ai_pricing.py` (rupees, a file,
+  not env): ₹5 per AI-call minute (whole minutes, all-inclusive), every other
+  feature at OpenRouter cost × 3 (per-feature overrides), ₹1.8/credit, ₹88/USD.
+  `agent/d10/pricing.py` prices each event when it is queued and sends the
+  charge in a `pricing` block; D10 debits exactly that. Needs the D10 build
+  from `feat/ai-cost-ledger`.
+- Every D10 usage event now names its `feature` (assistant, assistant_decision,
+  ai_call_reply, notes_transcription, notes_summary, voice_call). D10 builds
+  that predate the field ignore it.
+- `build_unit_usage_event` + four event types for non-token spend:
+  `ai.speech_to_text`, `ai.text_to_speech`, `ai.voice_agent_session`,
+  `telephony.call`. **Deploy D10 first**: the outbox retries a rejected batch
+  whole, so one event type an old D10 rejects would hold back all usage.
+- `/audio-to-text` accepts an optional `usage_context`; when (and only when)
+  D10's own key authenticated the call, transcription (audio ms + OpenRouter
+  cost) and summary (tokens + cost) go to that clinic's D10 ledger instead of
+  the Node ledger.
+- Voice agent books each call per component — reply LLM (OpenRouter list
+  price), STT, TTS, agent session, and SIP phone line when a phone caller was
+  present — from `voice_call/costs.py` (LiveKit list prices, versioned). With a
+  clinic `usage_context` in the dispatch metadata it goes to D10 through its own
+  outbox (`<D10_USAGE_OUTBOX_PATH>.voice`, also flushed by the API server's
+  loop); otherwise it is platform spend in the Node ledger. Sample 95-second
+  call: ~$0.037 (Plivo carrier leg not included).
+- Worker keeps 2 warm processes in production (LiveKit's default is one per
+  CPU core, which exhausted memory on a 16-core dev machine).
+
+## [Unreleased] — LiveKit real-time voice agent (Phase 1: lab only)
+
+**Added**
+
+- `voice_call/worker.py`: a LiveKit Agents (1.8.3) worker, run as its own process
+  with `python -m livekit.agents start voice_call/worker.py`. It joins a room only
+  when dispatched by name (`LIVEKIT_AGENT_NAME`, default `dentnode-voice`).
+  STT, TTS, VAD and end-of-turn detection (Hindi included) run on LiveKit
+  Inference; the reply LLM goes to **OpenRouter** through the OpenAI-compatible
+  plugin, so the one-key/OpenRouter-only rule holds. Defaults: Deepgram Nova-3
+  (`multi`, English/Hindi code-switching) → Claude Haiku 4.5 → Fish Audio S2.1 Pro.
+  Per-call choices come from dispatch metadata and are allowlisted in
+  `voice_call/config.py`.
+- LiveKit Cloud session recording is forced **off** (`record=False`): with the
+  project setting on, LiveKit would upload call audio, transcripts and logs.
+- LLM tokens are metered per call (`feature=voice_call`, `__platform__`) at
+  session end; STT/TTS minutes bill to the LiveKit project, not the ledger.
+- Voice Lab gains an Engine switch. "LiveKit agent" mints a 15-minute room token
+  with the agent dispatch attached (`POST /voice-lab/livekit/session`) and shows
+  LiveKit's own per-turn report (end-of-turn, first token, first sound, e2e).
+- `agent/calling_prompt.py`: one shared call prompt. `/calling/voice/reply`
+  produces byte-identical text to before (English-only for Plivo `<Speak>`);
+  the LiveKit agent and Voice Lab use the multilingual variant.
+- New optional env: `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`.
+  Not yet in the VPS secret contract — the worker is not deployed.
+
+## [Unreleased] — Voice agent + Voice Lab dev harness
+
+**Added**
+
+- `agent/voice_agent.py`: one spoken turn, caller audio → transcript → reply →
+  speech, with each OpenRouter stage timed separately. TTS uses OpenRouter's
+  dedicated `POST /audio/speech` endpoint (real TTS models that read verbatim,
+  MP3 output), defaulting to `google/gemini-3.8-flash-tts`. The reply prompt
+  mirrors `/calling/voice/reply`.
+- `voice_lab/`: `GET /voice-lab` serves a static browser page for talking to the
+  agent and seeing latency per stage (transcribe, reply, voice first byte,
+  network) plus time to first audio; `POST /voice-lab/turn` streams NDJSON
+  events. Both API routes need `x-internal-key`; the page holds no secret.
+  Models and voices come from hardcoded allowlists, so there is no new env var.
+- Spend is metered as feature `voice_lab` against `__platform__`.
+- The page is a hands-free call: one Start call, an energy-based end-of-turn
+  detector (configurable silence, 300 ms pre-roll, half-duplex so the agent can't
+  trigger itself), each turn shown as customer audio → model reply → voice with
+  replay, and a per-model-combination latency table.
+- TTS is requested as raw PCM (Gemini TTS rejects `mp3`); the sample rate is read
+  from the response Content-Type (Gemini/MAI 24 kHz, Fish 44.1 kHz) and the page
+  schedules chunks on Web Audio as they arrive, with a replay player per turn.
+- The reply call sends `reasoning: {enabled: false}` (except models where reasoning
+  is mandatory, e.g. `google/gemini-3.5-flash-lite`): hidden reasoning added ~0.5s
+  and could consume the token cap, returning an empty reply.
+
+**Measured 2026-09-30 (Hindi turn, Haiku 4.5 reply, 3 runs each, time to first audio)**
+
+| TTS model | TTS first byte | First audio |
+|---|---|---|
+| fish-audio/s2.1-pro | 0.33–0.36s | 2.2–3.5s |
+| microsoft/mai-voice-2-flash | 1.4–1.6s | 3.4–4.2s |
+| microsoft/mai-voice-2 | 1.4–2.0s | 3.3–4.5s |
+| google/gemini-3.8-flash-lite-tts | 5.5–6.4s | 7.5–10.2s |
+| google/gemini-3.8-flash-tts | 5.6–7.8s | 7.5–11.8s |
+
+Gemini TTS does not stream through OpenRouter (first byte ≈ full synthesis), so it
+suits pre-rendered clips, not live conversation.
 
 ## [Unreleased] — Retire Cloud Run hosting
 

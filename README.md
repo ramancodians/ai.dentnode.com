@@ -24,6 +24,10 @@ DentNode VPS behind Caddy.
 
 ## Architecture
 
+Reusable voice/chat business tools: see [reception tool contract](docs/reception-tools.md)
+for `/reception/tools/catalog` and `/reception/tools/execute`, D10 appointment and
+callback capabilities, and the app's staff tool adapter.
+
 ```
 Browser ──SSE──> Node backend (app.dentnode.com)  [auth, history, rate-limit, ₹ cap]
                       │  POST /agent/run  (x-internal-key, NDJSON stream)

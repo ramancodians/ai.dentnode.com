@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Lab</title>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.22.3/dist/livekit-client.umd.js"></script>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #fff; --ink: #1b1b1a; --muted: #6b6b66; --line: #e4e4df;
+    --accent: #0f766e; --rec: #dc2626; --vad: #a8a29e; --stt: #6366f1; --reply: #d97706; --tts: #0f766e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #131312; --panel: #1c1c1b; --ink: #ececea; --muted: #9a9a94; --line: #2e2e2c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 20px 16px 60px; display: grid; gap: 16px; grid-template-columns: 280px 1fr; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; min-width: 0; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input, select, textarea { width: 100%; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  textarea { resize: vertical; min-height: 64px; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 7px 12px; }
+  .lk .ours-only { display: none; }
+  .row { display: flex; gap: 6px; } .row > * { flex: 1; min-width: 0; }
+
+  .call { display: flex; align-items: center; gap: 14px; }
+  #call { border: 0; border-radius: 999px; padding: 12px 22px; font-weight: 600; background: var(--accent); color: #fff; }
+  #call.live { background: var(--rec); }
+  .state { flex: 1; min-width: 0; }
+  #state { font-weight: 600; }
+  #hint { font-size: 12px; color: var(--muted); }
+  .meter { height: 6px; border-radius: 3px; background: var(--line); margin-top: 6px; position: relative; overflow: hidden; }
+  #level { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); transition: width 60ms linear; }
+  #thresh { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--rec); }
+  #results { margin-top: 12px; overflow-x: auto; }
+  #results table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  #results th, #results td { text-align: right; padding: 5px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  #results th:first-child, #results td:first-child { text-align: left; white-space: normal; }
+  #results th { color: var(--muted); font-weight: 500; }
+  #results td b { font-size: 13px; }
+  #results .best td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+  #log { display: grid; gap: 12px; margin-top: 14px; }
+  .turn { border-top: 1px solid var(--line); padding-top: 12px; }
+  .stage { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: start; margin-bottom: 8px; }
+  .num { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; color: #fff; }
+  .s1 .num { background: var(--stt); } .s2 .num { background: var(--reply); } .s3 .num { background: var(--tts); }
+  .title { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .text { margin-top: 1px; overflow-wrap: anywhere; }
+  .ms { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  audio { width: 100%; height: 30px; margin-top: 4px; }
+  .total { font-size: 13px; font-variant-numeric: tabular-nums; }
+  .total b { font-size: 17px; }
+  .bar { display: flex; height: 8px; border-radius: 3px; overflow: hidden; background: var(--line); margin: 6px 0 2px; }
+  .bar span { height: 100%; }
+  .err { color: var(--rec); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <section class="panel">
+    <h1>Voice Lab</h1>
+    <label for="key">Internal key</label>
+    <input id="key" type="password" autocomplete="off" placeholder="INTERNAL_API_KEY">
+    <label for="engine">Engine</label>
+    <select id="engine">
+      <option value="ours">Our pipeline (turn by turn)</option>
+      <option value="livekit">LiveKit agent (streaming)</option>
+    </select>
+    <label for="stt">1 · Transcription model</label>
+    <select id="stt"></select>
+    <label for="reply">2 · Reply model</label>
+    <select id="reply"></select>
+    <label for="tts">3 · Voice model</label>
+    <select id="tts"></select>
+    <div class="row">
+      <div class="ours-only"><label for="voice">Voice</label><select id="voice"></select></div>
+      <div><label for="lang">Language</label><select id="lang"></select></div>
+    </div>
+    <div class="ours-only">
+      <label for="style">Style (Gemini only)</label>
+      <input id="style" placeholder="warm, calm clinic receptionist">
+      <label for="silence">End of turn after silence</label>
+      <select id="silence">
+        <option value="500">0.5s</option><option value="700" selected>0.7s</option>
+        <option value="1000">1.0s</option><option value="1500">1.5s</option>
+      </select>
+    </div>
+    <label for="objective">Call objective</label>
+    <textarea id="objective"></textarea>
+  </section>
+
+  <section class="panel">
+    <div class="call">
+      <button id="call">Start call</button>
+      <div class="state">
+        <div id="state">Not connected</div>
+        <div id="hint">Paste the key, then start the call and just talk. Use headphones so the agent doesn't hear itself.</div>
+        <div class="meter"><div id="level"></div><div id="thresh"></div></div>
+      </div>
+    </div>
+    <div id="results"></div>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem('voicelab.' + k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem('voicelab.' + k, v); } catch {} },
+};
+const fmt = (ms) => ms == null ? '–' : (ms / 1000).toFixed(2) + 's';
+let options = null, history = [];
+// Per model combination: what each turn felt like and what each stage took.
+const results = new Map();
+const median = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.floor(s.length / 2)] : null; };
+const short = (m) => m.split('/').pop();
+function record(combo, row) {
+  if (!results.has(combo)) results.set(combo, []);
+  results.get(combo).push(row);
+  const rows = [...results].map(([k, v]) => ({
+    k, n: v.length, felt: median(v.map((r) => r.felt)), best: Math.min(...v.map((r) => r.felt)),
+    stt: median(v.map((r) => r.stt)), reply: median(v.map((r) => r.reply)), tts: median(v.map((r) => r.tts)),
+  })).sort((a, b) => a.felt - b.felt);
+  $('results').innerHTML = `<table><tr><th>Transcribe → reply → voice</th><th>Turns</th><th>Median</th><th>Best</th><th>Transcribe</th><th>Reply</th><th>Voice first sound</th></tr>` +
+    rows.map((r, i) => `<tr class="${i === 0 && rows.length > 1 ? 'best' : ''}"><td>${r.k}</td><td>${r.n}</td><td><b>${fmt(r.felt)}</b></td><td>${fmt(r.best)}</td><td>${fmt(r.stt)}</td><td>${fmt(r.reply)}</td><td>${fmt(r.tts)}</td></tr>`).join('') +
+    `</table>`;
+}
+
+// ---------- settings ----------
+function fill(sel, values, keep) {
+  sel.innerHTML = '';
+  for (const v of values) sel.add(new Option(v || (sel.id === 'lang' ? 'auto' : 'default'), v));
+  if (keep !== null && values.includes(keep)) sel.value = keep;
+}
+function fillVoices() { fill($('voice'), options.tts_voices[$('tts').value] || [''], store.get('voice')); }
+const isLk = () => $('engine').value === 'livekit';
+// stt/reply/tts choices are remembered per engine: the model lists differ.
+const keyFor = (id) => (['stt', 'reply', 'tts'].includes(id) && isLk() ? 'lk.' + id : id);
+function fillModels() {
+  const lists = isLk() ? options.livekit : options;
+  fill($('stt'), lists.stt_models, store.get(keyFor('stt')));
+  fill($('reply'), lists.reply_models, store.get(keyFor('reply')));
+  fill($('tts'), lists.tts_models, store.get(keyFor('tts')));
+  if (!isLk()) fillVoices();
+  document.body.classList.toggle('lk', isLk());
+}
+async function loadOptions() {
+  const key = $('key').value.trim();
+  if (!key) return;
+  const r = await fetch('/voice-lab/options', { headers: { 'x-internal-key': key } });
+  if (!r.ok) { setState(r.status === 401 ? 'Key rejected' : 'Could not load options (' + r.status + ')'); return; }
+  options = await r.json();
+  const lkOption = $('engine').querySelector('[value=livekit]');
+  lkOption.disabled = !options.livekit.enabled;
+  if (!options.livekit.enabled) lkOption.textContent = 'LiveKit agent — not configured';
+  $('engine').value = options.livekit.enabled && store.get('engine') === 'livekit' ? 'livekit' : 'ours';
+  fill($('lang'), options.languages, store.get('lang'));
+  fillModels();
+  $('objective').value = store.get('objective') || options.default_objective;
+  $('style').value = store.get('style') || '';
+  if (store.get('silence')) $('silence').value = store.get('silence');
+  setState('Ready — press Start call');
+}
+$('key').value = store.get('key') || '';
+$('key').addEventListener('change', () => { store.set('key', $('key').value.trim()); loadOptions(); });
+for (const id of ['tts', 'voice', 'lang', 'reply', 'stt', 'style', 'objective', 'silence']) {
+  $(id).addEventListener('change', () => { store.set(keyFor(id), $(id).value); if (id === 'tts' && !isLk()) fillVoices(); });
+}
+$('engine').addEventListener('change', () => {
+  if (call || lk) { $('engine').value = lk ? 'livekit' : 'ours'; return; }   // not mid-call
+  store.set('engine', $('engine').value); fillModels();
+});
+loadOptions();
+function setState(text) { $('state').textContent = text; }
+
+// ---------- the call: open mic + energy VAD, half-duplex ----------
+// Phase: listening → (speech) → capturing → (silence) → thinking → speaking → listening.
+// The mic is ignored while the agent speaks, so laptop speakers can't trigger a turn.
+const PREROLL_MS = 300, MIN_SPEECH_MS = 250, ONSET_MS = 120;
+let call = null;
+
+async function startCall() {
+  if (!options) { setState('Paste the internal key first'); return; }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+  const ctx = new AudioContext();
+  const src = ctx.createMediaStreamSource(stream);
+  const node = ctx.createScriptProcessor(2048, 1, 1);
+  const frameMs = 2048 / ctx.sampleRate * 1000;
+  call = { stream, ctx, src, node, frameMs, phase: 'calibrating', floor: 0, calib: [], ring: [], speech: [], loudMs: 0, quietMs: 0, speechMs: 0, playAt: 0 };
+  node.onaudioprocess = (e) => onFrame(new Float32Array(e.inputBuffer.getChannelData(0)));
+  src.connect(node); node.connect(ctx.destination);
+  $('call').textContent = 'End call'; $('call').classList.add('live');
+  setState('Calibrating… stay quiet for a moment');
+}
+
+function endCall() {
+  if (!call) return;
+  call.node.disconnect(); call.src.disconnect(); call.stream.getTracks().forEach((t) => t.stop()); call.ctx.close();
+  call = null;
+  $('call').textContent = 'Start call'; $('call').classList.remove('live');
+  $('level').style.width = '0'; setState('Call ended');
+}
+$('call').onclick = () => {
+  if (isLk()) return lk ? lkEnd() : lkStart().catch((e) => { lkEnd(); setState('Could not start: ' + e.message); });
+  return call ? endCall() : startCall().catch((e) => setState('Microphone blocked: ' + e.message));
+};
+
+function threshold() { return Math.max(0.012, call.floor * 3.5); }
+
+function onFrame(f) {
+  const c = call; if (!c) return;
+  let sum = 0; for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
+  const rms = Math.sqrt(sum / f.length);
+  $('level').style.width = Math.min(100, rms * 800) + '%';
+
+  if (c.phase === 'calibrating') {
+    c.calib.push(rms);
+    if (c.calib.length * c.frameMs > 600) {
+      c.floor = c.calib.sort((a, b) => a - b)[Math.floor(c.calib.length / 2)];
+      $('thresh').style.left = Math.min(100, threshold() * 800) + '%';
+      listen();
+    }
+    return;
+  }
+  if (c.phase === 'listening') {
+    c.ring.push(f); while (c.ring.length * c.frameMs > PREROLL_MS) c.ring.shift();
+    if (rms > threshold()) {
+      c.loudMs += c.frameMs;
+      if (c.loudMs >= ONSET_MS) { c.phase = 'capturing'; c.speech = [...c.ring]; c.quietMs = 0; c.speechMs = c.loudMs; setState('Hearing you…'); }
+    } else c.loudMs = 0;
+    return;
+  }
+  if (c.phase === 'capturing') {
+    c.speech.push(f);
+    if (rms > threshold()) { c.quietMs = 0; c.speechMs += c.frameMs; }
+    else c.quietMs += c.frameMs;
+    if (c.quietMs >= Number($('silence').value)) {
+      const endedAt = performance.now();
+      if (c.speechMs < MIN_SPEECH_MS) { listen(); return; }   // a cough or a click
+      c.phase = 'thinking';
+      const trimmed = c.speech.slice(0, Math.max(1, c.speech.length - Math.floor((c.quietMs - 200) / c.frameMs)));
+      turn(trimmed, c.ctx.sampleRate, endedAt, c.quietMs);
+    }
+  }
+}
+
+function listen() {
+  if (!call) return;
+  Object.assign(call, { phase: 'listening', ring: [], speech: [], loudMs: 0, quietMs: 0, speechMs: 0 });
+  setState('Listening — go ahead and speak');
+}
+
+// ---------- audio helpers ----------
+function floatToWav(chunks, inRate, outRate) {
+  const len = chunks.reduce((n, c) => n + c.length, 0);
+  const all = new Float32Array(len); let o = 0;
+  for (const c of chunks) { all.set(c, o); o += c.length; }
+  const ratio = inRate / outRate, n = Math.floor(len / ratio);
+  const pcm = new Uint8Array(n * 2), v = new DataView(pcm.buffer);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(len, Math.floor((i + 1) * ratio));
+    let s = 0; for (let j = a; j < b; j++) s += all[j];
+    s = Math.max(-1, Math.min(1, s / Math.max(1, b - a)));
+    v.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return pcmToWav([pcm], outRate);
+}
+function pcmToWav(chunks, rate) {
+  const len = chunks.reduce((n, c) => n + c.length, 0) & ~1;
+  const buf = new Uint8Array(44 + len), v = new DataView(buf.buffer);
+  const w = (p, s) => { for (let i = 0; i < s.length; i++) buf[p + i] = s.charCodeAt(i); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + len, true); w(8, 'WAVE'); w(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, len, true);
+  let o = 44; for (const c of chunks) { const k = Math.min(c.length, 44 + len - o); buf.set(c.subarray(0, k), o); o += k; }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+// Streams raw 16-bit PCM chunks onto the call's AudioContext as they arrive.
+function makePlayer(ctx, onFirstSound) {
+  let rate = 24000, carry = null, started = false;
+  const kept = [];
+  const p = {
+    endsAt: 0,
+    format(f) { rate = f.rate || 24000; },
+    wav() { return pcmToWav(kept, rate); },
+    push(bytes) {
+      kept.push(bytes);
+      if (carry) { const m = new Uint8Array(carry.length + bytes.length); m.set(carry); m.set(bytes, carry.length); bytes = m; carry = null; }
+      if (bytes.length % 2) { carry = bytes.slice(-1); bytes = bytes.slice(0, -1); }
+      if (!bytes.length) return;
+      const n = bytes.length / 2, dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+      const buf = ctx.createBuffer(1, n, rate), ch = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) ch[i] = dv.getInt16(i * 2, true) / 32768;
+      const s = ctx.createBufferSource(); s.buffer = buf; s.connect(ctx.destination);
+      if (p.endsAt < ctx.currentTime) p.endsAt = ctx.currentTime + 0.02;
+      s.start(p.endsAt); p.endsAt += buf.duration;
+      if (!started) { started = true; onFirstSound(); }
+    },
+  };
+  return p;
+}
+
+// ---------- one turn ----------
+function turnEl(audioUrl) {
+  const el = document.createElement('div'); el.className = 'turn';
+  el.innerHTML = `
+    <div class="stage s1"><div class="num">1</div><div><div class="title">Customer audio</div>${audioUrl ? `<audio controls src="${audioUrl}"></audio>` : ''}<div class="text t1">Transcribing…</div></div><div class="ms m1"></div></div>
+    <div class="stage s2"><div class="num">2</div><div><div class="title">Model reply</div><div class="text t2">…</div></div><div class="ms m2"></div></div>
+    <div class="stage s3"><div class="num">3</div><div><div class="title">Voice</div><audio class="a3" controls hidden></audio><div class="text t3"></div></div><div class="ms m3"></div></div>
+    <div class="foot"></div>`;
+  $('log').prepend(el); return el;
+}
+
+async function turn(frames, inRate, endedAt, silenceMs) {
+  const wav = floatToWav(frames, inRate, 16000);
+  const el = turnEl(URL.createObjectURL(wav));
+  const q = (s) => el.querySelector(s);
+  setState('Thinking…');
+
+  const fd = new FormData();
+  fd.append('audio', wav, 'turn.wav');
+  fd.append('history', JSON.stringify(history));
+  for (const [f, id] of [['tts_model', 'tts'], ['voice', 'voice'], ['language', 'lang'], ['reply_model', 'reply'], ['stt_model', 'stt'], ['style', 'style'], ['objective', 'objective']]) fd.append(f, $(id).value);
+
+  // Snapshot the models now: the settings may change while this turn runs.
+  const combo = { stt: $('stt').value, reply: $('reply').value, tts: $('tts').value };
+  const t0 = performance.now();
+  let heardAt = null, heard = '', reply = '', server = null, costs = null, error = null;
+  const player = makePlayer(call.ctx, () => { heardAt = performance.now() - t0; setState('Agent speaking…'); render(); });
+
+  function render() {
+    const s = server || {};
+    q('.m1').textContent = s.stt_ms != null ? fmt(s.stt_ms) : '';
+    q('.m2').textContent = s.reply_ms != null ? fmt(s.reply_ms) : '';
+    q('.m3').innerHTML = s.tts_first_byte_ms != null ? `first sound ${fmt(s.tts_first_byte_ms)}<br>complete ${fmt(s.tts_total_ms)}` : '';
+    const segs = [['var(--vad)', silenceMs], ['var(--stt)', s.stt_ms], ['var(--reply)', s.reply_ms], ['var(--tts)', s.tts_first_byte_ms]].filter(([, v]) => v != null);
+    const sum = segs.reduce((n, [, v]) => n + v, 0) || 1;
+    const felt = heardAt != null ? silenceMs + heardAt : null;
+    const cost = costs ? ['stt_usd', 'reply_usd', 'tts_usd'].reduce((n, k) => n + (costs[k] || 0), 0) : null;
+    q('.foot').innerHTML =
+      `<div class="total">You stopped talking → agent started: <b>${fmt(felt)}</b>` +
+      ` <span class="ms">(${fmt(silenceMs)} waiting for silence + ${fmt(heardAt)} pipeline)</span></div>` +
+      `<div class="bar">${segs.map(([c, v]) => `<span style="width:${v / sum * 100}%;background:${c}"></span>`).join('')}</div>` +
+      (cost != null ? `<div class="ms" style="text-align:left">Cost $${cost.toFixed(5)}${costs.tts_usd == null ? ' + voice (not reported yet)' : ''}</div>` : '') +
+      (error ? `<div class="err">${error}</div>` : '');
+  }
+
+  try {
+    const r = await fetch('/voice-lab/turn', { method: 'POST', body: fd, headers: { 'x-internal-key': $('key').value.trim() } });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || ('HTTP ' + r.status));
+    const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const ev = JSON.parse(line);
+        if (ev.type === 'transcript') { heard = ev.text; q('.t1').textContent = ev.text; }
+        else if (ev.type === 'reply') { reply = ev.text; q('.t2').textContent = ev.text; }
+        else if (ev.type === 'format') { player.format(ev); }
+        else if (ev.type === 'audio') { if (call) player.push(Uint8Array.from(atob(ev.b64), (ch) => ch.charCodeAt(0))); }
+        else if (ev.type === 'done') { server = ev.timings; const a = q('.a3'); a.src = URL.createObjectURL(player.wav()); a.hidden = false; render(); }
+        else if (ev.type === 'cost') { costs = ev.costs; render(); }
+        else if (ev.type === 'error') { error = `Failed at ${ev.stage}: ${ev.message}`; if (ev.stage === 'stt') q('.t1').textContent = '—'; render(); }
+      }
+    }
+    if (reply) history.push({ caller: heard, agent: reply });
+  } catch (e) {
+    error = e.message; render();
+  }
+
+  if (heardAt != null && server) {
+    record(`${short(combo.stt)} → ${short(combo.reply)} → ${short(combo.tts)}`,
+      { felt: silenceMs + heardAt, stt: server.stt_ms, reply: server.reply_ms, tts: server.tts_first_byte_ms });
+  }
+  // Resume listening only once the agent has finished speaking (half-duplex).
+  if (!call) return;
+  const wait = Math.max(0, (player.endsAt - call.ctx.currentTime) * 1000) + 250;
+  setTimeout(() => { if (call && call.phase === 'thinking') listen(); }, wait);
+}
+
+// ---------- LiveKit engine: the agent runs in a LiveKit room; we just join it ----------
+// LiveKit does the VAD, end-of-turn detection, interruptions and streaming. The
+// worker publishes each finished message with LiveKit's own latency report.
+let lk = null;
+
+async function lkStart() {
+  if (!options) { setState('Paste the internal key first'); return; }
+  if (!window.LivekitClient) throw new Error('LiveKit client failed to load');
+  setState('Creating room…');
+  const combo = { stt: $('stt').value, reply: $('reply').value, tts: $('tts').value };
+  const r = await fetch('/voice-lab/livekit/session', {
+    method: 'POST', headers: { 'x-internal-key': $('key').value.trim(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stt_model: combo.stt, reply_model: combo.reply, tts_model: combo.tts, language: $('lang').value, objective: $('objective').value }),
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || ('HTTP ' + r.status));
+  const { url, token } = await r.json();
+  const { Room, RoomEvent, Track } = LivekitClient;
+  const room = new Room({ audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  lk = { room, combo, turn: null, audio: [] };
+  room.on(RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind !== Track.Kind.Audio) return;
+    const el = track.attach(); el.hidden = true; document.body.appendChild(el); if (lk) lk.audio.push(el);
+  });
+  room.on(RoomEvent.DataReceived, (payload, participant, kind, topic) => {
+    if (topic !== 'dentnode.voice') return;
+    try { lkEvent(JSON.parse(new TextDecoder().decode(payload))); } catch (e) { console.warn('voice event', e); }
+  });
+  room.on(RoomEvent.Disconnected, () => { if (lk && lk.room === room) lkEnd(); });
+  await room.connect(url, token);
+  await room.localParticipant.setMicrophoneEnabled(true);
+  $('call').textContent = 'End call'; $('call').classList.add('live');
+  setState('Connected — waiting for the agent…');
+}
+
+function lkEnd() {
+  if (!lk) return;
+  const { room, audio } = lk; lk = null;
+  audio.forEach((el) => el.remove());
+  room.disconnect();
+  $('call').textContent = 'Start call'; $('call').classList.remove('live');
+  setState('Call ended');
+}
+
+const LK_STATES = { listening: 'Listening — go ahead and speak', thinking: 'Thinking…', speaking: 'Agent speaking…', initializing: 'Agent joining…' };
+
+function lkEvent(ev) {
+  if (!lk) return;
+  if (ev.type === 'state') { setState(LK_STATES[ev.agent] || ev.agent); return; }
+  if (ev.type !== 'message') return;
+  const m = ev.metrics || {};
+  if (ev.role === 'user') {
+    const el = turnEl(null);
+    el.querySelector('.t1').textContent = ev.text;
+    el.querySelector('.m1').innerHTML = `transcript ${fmt(m.transcription_delay)}<br>end of turn ${fmt(m.end_of_turn_delay)}`;
+    lk.turn = { el, user: m };
+    return;
+  }
+  // Assistant: completes the open turn, or stands alone for the greeting.
+  const t = lk.turn; lk.turn = null;
+  const el = t ? t.el : turnEl(null);
+  const q = (sel) => el.querySelector(sel);
+  if (!t) q('.t1').textContent = '(call opened — the agent speaks first)';
+  q('.t2').textContent = ev.text + (ev.interrupted ? '  [interrupted]' : '');
+  q('.m2').textContent = m.llm_node_ttft != null ? `first token ${fmt(m.llm_node_ttft)}` : '';
+  q('.t3').textContent = 'Streamed into the call';
+  q('.m3').innerHTML = m.tts_node_ttfb != null ? `first sound ${fmt(m.tts_node_ttfb)}` : '';
+  if (t && m.e2e_latency != null) {
+    const u = t.user;
+    q('.foot').innerHTML = `<div class="total">You stopped talking → agent started: <b>${fmt(m.e2e_latency)}</b>` +
+      ` <span class="ms">(end of turn ${fmt(u.end_of_turn_delay)} · first token ${fmt(m.llm_node_ttft)} · first sound ${fmt(m.tts_node_ttfb)})</span></div>`;
+    record(`LiveKit: ${short(lk.combo.stt)} → ${short(lk.combo.reply)} → ${short(lk.combo.tts)}`,
+      { felt: m.e2e_latency, stt: u.transcription_delay, reply: m.llm_node_ttft, tts: m.tts_node_ttfb });
+  }
+}
+</script>
+</body>
+</html>
