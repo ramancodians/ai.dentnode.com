@@ -92,6 +92,12 @@ class Settings:
     # D10_INTERNAL_KEY explicitly.
     d10_internal_key: str = _get("D10_INTERNAL_KEY", "") or internal_key
     calling_voice_internal_key: str = _get("CALLING_VOICE_INTERNAL_KEY", "")
+    # LiveKit Cloud project for the real-time voice agent (voice_call/worker.py,
+    # a separate process) and for Voice Lab's LiveKit mode, which mints room
+    # tokens. Optional: unset disables both without affecting anything else.
+    livekit_url: str = _get("LIVEKIT_URL", "")
+    livekit_api_key: str = _get("LIVEKIT_API_KEY", "")
+    livekit_api_secret: str = _get("LIVEKIT_API_SECRET", "")
     d10_internal_base_url: str = _get(
         "D10_INTERNAL_BASE_URL", "http://localhost:3000/api"
     ).rstrip("/")

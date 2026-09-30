@@ -23,6 +23,8 @@ COPY scan_review ./scan_review
 # server.py imports scan_qa unconditionally — omitting this kills the container
 # on startup with ModuleNotFoundError, before any health check can run.
 COPY scan_qa ./scan_qa
+COPY voice_lab ./voice_lab
+COPY voice_call ./voice_call
 
 # Run as non-root.
 RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin laby \

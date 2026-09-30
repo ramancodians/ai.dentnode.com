@@ -13,6 +13,7 @@ from uuid import uuid4
 import httpx
 
 from agent.config import settings
+from agent.d10.pricing import price_event
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,13 @@ def _money_fields(cost: Optional[float]) -> tuple[Optional[str], Optional[int]]:
     )
 
 
+def _pricing(event_type: str, feature: Optional[str], cost_micros: Optional[int], **extra: Any) -> Dict[str, Any]:
+    """The ai_pricing.py charge, stored with the event so a retry sends the
+    same amount even after the file changes."""
+    pricing = price_event(event_type=event_type, feature=feature, cost_micros_usd=cost_micros, **extra)
+    return {"pricing": pricing} if pricing else {}
+
+
 def build_model_usage_event(
     *,
     context: Any,
@@ -58,8 +66,12 @@ def build_model_usage_event(
     status: str,
     cost_usd: Optional[float] = None,
     error_code: Optional[str] = None,
+    feature: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build a PHI-free event. D10, not this service, applies its rate card."""
+    """Build a PHI-free event, charged per ``ai_pricing.py``.
+
+    ``feature`` names the product feature that caused the spend, so D10 can
+    report AI cost per clinic per feature; it also picks the multiplier."""
     usage = usage or {}
     cost_text, cost_micros = _money_fields(cost_usd)
     provider_id = provider_request_id or "unassigned"
@@ -105,6 +117,82 @@ def build_model_usage_event(
         "provider_cost_micros_usd": cost_micros,
         "raw_usage": raw_usage or {},
         "error_code": error_code,
+        **({"feature": feature} if feature else {}),
+        **_pricing("ai.model_call", feature, cost_micros),
+    }
+
+
+# Non-token usage. Each type carries exactly one unit in modal_units; D10 rates
+# only that unit. D10 must be deployed with these types before any is sent:
+# the outbox retries a rejected batch as a whole, so one unknown event type
+# would hold back every clinic's usage behind it.
+UNIT_EVENT_KEYS = {
+    "ai.speech_to_text": "audio_input_ms",
+    "ai.text_to_speech": "tts_characters",
+    "ai.voice_agent_session": "agent_session_ms",
+    "telephony.call": "telephony_ms",
+}
+
+
+def build_unit_usage_event(
+    *,
+    context: Any,
+    event_type: str,
+    quantity: int,
+    feature: str,
+    provider: str,
+    model: str,
+    sequence: int,
+    provider_request_id: Optional[str] = None,
+    cost_usd: Optional[float] = None,
+    cost_source: str = "provider",
+    latency_ms: int = 0,
+    raw_usage: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """A PHI-free speech/voice/phone usage event (see ``UNIT_EVENT_KEYS``).
+
+    ``cost_source`` is "provider" when the provider reported the cost and
+    "price_table" when it was computed from list prices; it travels in
+    raw_usage so the owner report can tell the two apart."""
+    unit_key = UNIT_EVENT_KEYS[event_type]
+    cost_text, cost_micros = _money_fields(cost_usd)
+    now = time.time()
+    return {
+        "event_id": str(uuid4()),
+        "idempotency_key": f"d10-{event_type}:{context.correlation_id}:{sequence}:{provider_request_id or model}",
+        "event_type": event_type,
+        "feature": feature,
+        "occurred_at_unix_ms": int(now * 1000),
+        "clinic_id": context.clinic_id,
+        "user_id": context.user_id,
+        "actor_id": context.actor_id,
+        "conversation_id": context.conversation_id,
+        "source_message_id": context.source_message_id,
+        "correlation_id": context.correlation_id,
+        "causation_id": getattr(context, "causation_id", None),
+        "reservation_id": getattr(context, "reservation_id", None),
+        "provider": provider,
+        "gateway": provider,
+        "model": model,
+        "provider_request_id": provider_request_id,
+        "model_call_index": sequence,
+        "attempt": 1,
+        "status": "ok",
+        "latency_ms": max(0, int(latency_ms)),
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cached_input_tokens": 0,
+        "reasoning_tokens": 0,
+        "modal_units": {unit_key: max(0, int(quantity))},
+        "provider_cost_usd": cost_text,
+        "provider_cost_micros_usd": cost_micros,
+        "raw_usage": {**(raw_usage or {}), "cost_source": cost_source},
+        "error_code": None,
+        **_pricing(
+            event_type, feature, cost_micros,
+            agent_session_ms=max(0, int(quantity)) if unit_key == "agent_session_ms" else None,
+        ),
     }
 
 

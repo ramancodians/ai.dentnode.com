@@ -137,6 +137,7 @@ async def run_d10_turn(
             )
         except OpenRouterError as exc:
             usage_event = build_model_usage_event(
+                feature="assistant",
                 context=context,
                 model_call_index=usage_call_index,
                 attempt=1,
@@ -166,6 +167,7 @@ async def run_d10_turn(
             return
 
         usage_event = build_model_usage_event(
+            feature="assistant",
             context=context,
             model_call_index=usage_call_index,
             attempt=1,
@@ -232,6 +234,7 @@ async def run_d10_turn(
                     except JevError:
                         usage_call_index += 1
                         jev_usage = build_model_usage_event(
+                            feature="assistant_decision",
                             context=context,
                             model_call_index=usage_call_index,
                             attempt=1,
@@ -257,6 +260,7 @@ async def run_d10_turn(
                                 "cost": decision.cost_usd,
                             }
                             jev_usage = build_model_usage_event(
+                                feature="assistant_decision",
                                 context=context,
                                 model_call_index=usage_call_index,
                                 attempt=1,
