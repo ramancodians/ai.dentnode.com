@@ -16,7 +16,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from types import SimpleNamespace
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
@@ -53,6 +53,7 @@ from agent.usage import report_usage
 from agent.d10 import D10RequestContext, UsageOutbox, run_d10_turn
 from agent.reception.router import router as reception_tools_router
 from agent.d10.usage_outbox import build_model_usage_event, build_unit_usage_event
+from agent.d10.pricing import price_call_component
 
 # Standalone module — not part of Laby. Owns the /scan-review/* sub-namespace
 # (mesh QA from raw STL URLs); the flat POST /scan-review below is Laby's
@@ -585,6 +586,21 @@ async def agent_run(
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache, no-transform"},
     )
+
+
+class CallComponentPriceRequest(BaseModel):
+    provider_cost_micros: str = Field(pattern=r"^\d{1,12}$")
+    currency: Literal["USD", "INR"]
+    coverage: Literal["metered", "ai_inclusive"]
+
+
+@app.post("/d10/pricing/call-component")
+async def d10_call_component_price(
+    body: CallComponentPriceRequest,
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, Any]:
+    _require_d10_internal_key(x_d10_internal_key)
+    return {"pricing": price_call_component(provider_cost_micros=int(body.provider_cost_micros), currency=body.currency, coverage=body.coverage)}
 
 
 @app.post("/d10/agent/run")

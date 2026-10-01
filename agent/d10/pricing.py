@@ -22,6 +22,7 @@ CONFIG: Dict[str, Any] = {
     "ai_call_inr_per_minute": cfg.AI_CALL_INR_PER_MINUTE,
     "ai_call_round_up_to_minute": cfg.AI_CALL_ROUND_UP_TO_MINUTE,
     "default_multiplier": cfg.DEFAULT_MULTIPLIER,
+    "call_component_multiplier": cfg.CALL_COMPONENT_MULTIPLIER,
     "feature_multipliers": dict(cfg.FEATURE_MULTIPLIERS),
 }
 
@@ -32,7 +33,7 @@ def _validate(config: Dict[str, Any]) -> None:
             raise ValueError(f"ai_pricing.py: {key} must be greater than 0")
     if not config["ai_call_inr_per_minute"] >= 0:
         raise ValueError("ai_pricing.py: AI_CALL_INR_PER_MINUTE must be 0 or more")
-    multipliers = {"default": config["default_multiplier"], **config["feature_multipliers"]}
+    multipliers = {"default": config["default_multiplier"], "call_components": config["call_component_multiplier"], **config["feature_multipliers"]}
     for feature, value in multipliers.items():
         if not value >= 0:
             raise ValueError(f"ai_pricing.py: multiplier for {feature} must be 0 or more")
@@ -45,6 +46,23 @@ VERSION = hashlib.sha256(json.dumps(CONFIG, sort_keys=True).encode()).hexdigest(
 
 def _exact(value: float) -> Fraction:
     return Fraction(str(value))
+
+
+def price_call_component(*, provider_cost_micros: int, currency: str, coverage: str) -> Dict[str, Any]:
+    """Quote a verified provider charge; caller persists the quote before any retry.
+
+    No model request, wallet access, estimated provider rates or tenant state.
+    """
+    if currency not in ("USD", "INR") or coverage not in ("metered", "ai_inclusive"):
+        raise ValueError("Unsupported currency or coverage")
+    if provider_cost_micros < 0:
+        raise ValueError("Provider cost must be nonnegative")
+    base = {"version": VERSION, "inr_per_credit": CONFIG["inr_per_credit"], "inr_per_usd": CONFIG["inr_per_usd"]}
+    if coverage == "ai_inclusive":
+        return {**base, "rule": "included_in_call_minute", "charged_credits_micros": 0}
+    exchange = _exact(CONFIG["inr_per_usd"]) if currency == "USD" else Fraction(1)
+    credits = math.ceil(Fraction(provider_cost_micros) * exchange * _exact(CONFIG["call_component_multiplier"]) / _exact(CONFIG["inr_per_credit"]))
+    return {**base, "rule": "provider_cost_multiplier", "charged_credits_micros": credits, "multiplier": CONFIG["call_component_multiplier"]}
 
 
 def price_event(

@@ -25,6 +25,9 @@ AI_CALL_ROUND_UP_TO_MINUTE = True
 # Every other AI feature: provider cost (what DentNode paid OpenRouter) times a
 # multiplier. 3 = charge three times our cost.
 DEFAULT_MULTIPLIER = 3
+# Actual provider charges for ordinary phone calls, recordings and transcripts.
+# Estimates are never eligible. Inclusive AI calls do not pay these again.
+CALL_COMPONENT_MULTIPLIER = 3
 # Per-feature overrides, keyed by feature name as shown in the AI cost report.
 FEATURE_MULTIPLIERS: dict[str, float] = {
     # "assistant": 2,
