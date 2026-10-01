@@ -62,10 +62,15 @@ def test_vps_compose_has_no_public_port_or_data_network():
 
 def test_production_image_runs_nonroot_and_has_an_internal_healthcheck():
     dockerfile = (ROOT / "Dockerfile").read_text()
+    runtime = (ROOT / "runtime.py").read_text()
 
     assert "USER laby" in dockerfile
     assert "HEALTHCHECK" in dockerfile
-    assert "http://127.0.0.1:" in dockerfile
+    assert "COPY runtime.py ." in dockerfile
+    assert 'CMD ["python", "-m", "runtime", "--health"]' in dockerfile
+    assert "http://127.0.0.1:" in runtime
+    assert 'http://127.0.0.1:8081/' in runtime
+    assert "REGISTRATION_FILE.read_text()" in runtime
     assert "install -d -o laby -g laby -m 0700 /var/lib/dentnode-ai" in dockerfile
 
 
