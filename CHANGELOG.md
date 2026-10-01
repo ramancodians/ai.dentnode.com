@@ -6,7 +6,7 @@
   shortlists available tools without generating arguments or executing actions.
 - Preserves prerequisites and unmapped tools; ambiguous/failed decisions retain
   the full catalog. Meters each attempt through existing app/D10 usage paths.
-- Four offline selection-boundary checks pass. Savings and live integration
+- Six offline selection/authentication/fallback checks pass. Savings and live integration
   remain unmeasured; consumers must opt into the new route.
 
 ## [Unreleased] — Shared reception tool gateway (2026-10-01)
