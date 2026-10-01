@@ -36,13 +36,14 @@ services:
       test:
         - CMD
         - python
-        - -c
-        - "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8080')+'/health', timeout=3).read()"
+        - -m
+        - runtime
+        - --health
       interval: 30s
       timeout: 5s
       start_period: 30s
       retries: 3
-    stop_grace_period: 40s
+    stop_grace_period: 360s
     security_opt:
       - no-new-privileges:true
     cap_drop:

@@ -35,6 +35,8 @@ from agent.voice_agent import _REASONING_MANDATORY
 
 from .config import AGENT_NAME, MAX_CALL_SECONDS, CallConfig, opening_instructions, stt_language
 from .metering import book_call
+from .callbacks import notify
+from runtime import mark_voice_registered, validate_voice_config, voice_enabled
 
 os.environ["LIVEKIT_AGENT_NAME"] = AGENT_NAME
 
@@ -50,7 +52,16 @@ _METRIC_KEYS = (
 # LiveKit's default keeps one warm process per CPU core (16 on a dev laptop),
 # each holding the full import set; that exhausted memory locally. Two warm
 # processes cover our call volume; more are spawned on demand.
-server = AgentServer(num_idle_processes=ServerEnvOption(dev_default=0, prod_default=2))
+supervised = voice_enabled()
+if supervised:
+    validate_voice_config()
+server = AgentServer(
+    num_idle_processes=ServerEnvOption(dev_default=0, prod_default=int(os.environ.get("VOICE_WORKER_IDLE_PROCESSES", "1"))),
+    host="127.0.0.1", port=8081,
+    **({"max_retry": 0, "drain_timeout": 310, "shutdown_process_timeout": 30, "session_end_timeout": 30} if supervised else {}),
+)
+if supervised:
+    server.on("worker_registered", mark_voice_registered)
 
 
 def _reply_llm(model: str) -> lk_openai.LLM:
@@ -71,7 +82,19 @@ def _reply_llm(model: str) -> lk_openai.LLM:
 @server.rtc_session()
 async def entrypoint(ctx: JobContext) -> None:
     cfg = CallConfig.from_metadata(ctx.job.metadata)
+    try:
+        await run_call(ctx, cfg)
+    except Exception:
+        await notify(cfg.calling_service_callback, "failed")
+        ctx.shutdown(reason="voice_start_failed")
+        raise
+
+
+async def run_call(ctx: JobContext, cfg: CallConfig) -> None:
     await ctx.connect()
+    accepted = False
+    transcript: list[str] = []
+    transcript_size = 0
 
     tts_kwargs = {"voice": cfg.tts_voice} if cfg.tts_voice else {}
     language = stt_language(cfg.stt_model, cfg.language)
@@ -80,6 +103,9 @@ async def entrypoint(ctx: JobContext) -> None:
         llm=_reply_llm(cfg.reply_model),
         tts=inference.TTS(cfg.tts_model, **tts_kwargs),
     )
+    if cfg.calling_service_callback:
+        session.input.set_audio_enabled(False)
+        session.output.set_audio_enabled(False)
 
     async def publish(payload: dict) -> None:
         try:
@@ -90,9 +116,15 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("conversation_item_added")
     def _on_item(event) -> None:
+        nonlocal transcript_size
         item = event.item
         if getattr(item, "type", None) != "message" or item.role not in ("user", "assistant"):
             return
+        text = item.text_content or ""
+        if text and transcript_size < 100000:
+            line = f"{item.role}: {text}"[:100000 - transcript_size]
+            transcript.append(line)
+            transcript_size += len(line) + 1
         metrics = {k: round(v * 1000) for k, v in (item.metrics or {}).items()
                    if k in _METRIC_KEYS and isinstance(v, (int, float))}
         asyncio.ensure_future(publish({
@@ -127,8 +159,13 @@ async def entrypoint(ctx: JobContext) -> None:
         joined = sip_joined.pop(p.identity, None)
         if joined is not None:
             sip_seconds += time.monotonic() - joined
+            if cfg.calling_service_callback and not sip_joined:
+                ctx.shutdown(reason="caller_disconnected")
 
     async def book() -> None:
+        if not accepted:
+            await notify(cfg.calling_service_callback, "failed")
+            return
         now = time.monotonic()
         try:
             await book_call(
@@ -138,8 +175,14 @@ async def entrypoint(ctx: JobContext) -> None:
             )
         except Exception:  # noqa: BLE001 - metering must not fail the job teardown
             logger.exception("booking call usage failed")
+        finally:
+            await notify(cfg.calling_service_callback, "completed", "\n".join(transcript))
 
     ctx.add_shutdown_callback(book)
+
+    if cfg.calling_service_callback and not sip_joined:
+        ctx.shutdown(reason="caller_disconnected")
+        return
 
     await session.start(
         agent=Agent(instructions=calling_system_prompt(cfg.objective, cfg.recipient_name, multilingual=True)),
@@ -149,6 +192,18 @@ async def entrypoint(ctx: JobContext) -> None:
         # to LiveKit. Recordings belong to Calling Service's own storage.
         record=False,
     )
+    accepted = await notify(cfg.calling_service_callback, "started")
+    if not accepted:
+        ctx.shutdown(reason="call_claim_rejected")
+        return
+    # Start billable AI time only once the owner acknowledges the active claim.
+    session_started = time.monotonic()
+    if cfg.calling_service_callback:
+        if not sip_joined:
+            ctx.shutdown(reason="caller_disconnected")
+            return
+        session.input.set_audio_enabled(True)
+        session.output.set_audio_enabled(True)
     await publish({"type": "config", "stt": cfg.stt_model, "reply": cfg.reply_model,
                    "tts": cfg.tts_model, "language": cfg.language})
 

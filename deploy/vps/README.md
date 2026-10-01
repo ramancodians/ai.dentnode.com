@@ -62,6 +62,53 @@ The current `/health` endpoint proves that configuration validation and the
 SQLite outbox initialization completed. It deliberately does not make live
 OpenRouter, app.dentnode.com, or D10 calls.
 
+## Optional inbound voice worker
+
+The image entrypoint is `python -m runtime`. By default
+`VOICE_WORKER_ENABLED=false` directly execs the existing uvicorn API, with no
+voice process. Only enable it after installing the same LiveKit project
+credentials used by Calling Service into the root-owned secret file:
+`LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET`.
+
+Set `LIVEKIT_AGENT_NAME=dentnode-receptionist`,
+`CALLING_SERVICE_URL=https://calling.dentnode.com`, and
+`VOICE_WORKER_IDLE_PROCESSES=1` (allowed 0–2) in runtime configuration.
+`VOICE_WORKER_ENABLED=true` launches the API and a separate
+`python -m livekit.agents start voice_call/worker.py` child. The named worker
+accepts explicit dispatches only. It binds SDK health to loopback `8081`, never
+the external API port. Provision memory for both processes; 2 GiB is the
+initial reviewed VPS allocation, subject to measured usage.
+
+Container health uses `python -m runtime --health` (equivalently
+`python runtime.py --health`), requiring API health, a live worker PID, the
+public SDK `worker_registered` acknowledgement, and SDK health. The enabled
+worker uses `max_retry=0`: a connection loss makes SDK health fail immediately
+instead of appearing healthy through sixteen reconnect attempts. The
+supervisor gives startup 90 seconds and exits nonzero after repeated health
+failure or either child exiting, so Compose restarts the container. This
+couples API and worker availability; split them into separate services if
+voice volume warrants independent scaling.
+
+Registration is not an end-to-end audio, model, recording, or patient-call
+check. The API `/health` endpoint alone does not prove worker readiness.
+Promotion must include the composite container health check, and Calling
+Service's AI routing must remain gated until registration is verified.
+
+On SIGTERM/SIGINT the supervisor stops the worker parent first, allowing the
+SDK to drain calls (310 seconds, covering the 300-second call cap, plus
+30-second process/session shutdown) while the API
+remains available for metering. Remaining worker descendants are then killed,
+followed by API shutdown, within a 350-second budget. Keep Compose's
+`stop_grace_period: 360s`. Never send the first termination signal to the whole
+worker process group, which would kill active jobs before they can drain.
+
+Inbound audio input/output stays disabled until Calling Service acknowledges
+the worker's started callback. A rejected claim or absent caller closes the
+job without a greeting. Final transcripts are sent after metering with bounded
+callback retries; no durable transcript callback outbox exists yet, so a
+prolonged callback outage may lose that transcript. Service-side terminal
+reconciliation remains required.
+
 ## App-to-AI networking
 
 Initially set the Node application's `LABY_AGENT_URL` to

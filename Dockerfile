@@ -1,4 +1,4 @@
-# Laby ADK agent service — Python on Cloud Run.
+# Laby AI API and optional named voice worker — immutable VPS image.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # App code.
 COPY server.py .
+COPY runtime.py .
 COPY telemetry.py .
 COPY agent ./agent
 COPY scan_review ./scan_review
@@ -37,7 +38,7 @@ EXPOSE 8080
 # Uses the standard library so image health does not depend on curl/wget. The
 # FastAPI lifespan validates required configuration before this can return 200.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD ["python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8080')+'/health', timeout=3).read()"]
+  CMD ["python", "-m", "runtime", "--health"]
 
-# Cloud Run sets $PORT; uvicorn binds to it.
-CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# Disabled by default: exec the same uvicorn API directly. Opt-in supervises both.
+CMD ["python", "-m", "runtime"]

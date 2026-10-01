@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from agent.voice_agent import REPLY_MODELS
+from .callbacks import CallCallback
 
 # LiveKit reads the worker's name from LIVEKIT_AGENT_NAME. Setting a name puts
 # the worker in explicit-dispatch mode: it joins only rooms that ask for it by
@@ -39,8 +40,7 @@ TTS_MODELS = (
 LANGUAGES = ("", "en", "hi", "mr")
 
 DEFAULT_OBJECTIVE = (
-    "Remind the patient of their appointment with Dr. Mehta tomorrow at 11:30 AM "
-    "and ask them to confirm."
+    "Ask how you can help with the dental clinic. Do not invent patient, appointment, or clinic details."
 )
 MAX_CALL_SECONDS = 300
 # All required, or the call is booked as platform spend: D10 rejects an event
@@ -88,6 +88,7 @@ class CallConfig:
     # Set by a dispatcher acting for a clinic (Calling Service): books the
     # call's spend to that clinic's D10 ledger. Absent = platform spend.
     usage_context: Optional[Dict[str, str]] = None
+    calling_service_callback: Optional[CallCallback] = field(default=None, repr=False)
     extra: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -99,6 +100,7 @@ class CallConfig:
         if not isinstance(data, dict):
             data = {}
         cfg = cls()
+        cfg.calling_service_callback = CallCallback.parse(data.get("calling_service_callback"))
         for key in ("objective", "recipient_name", "clinic_name", "greeting", "tts_voice", "source"):
             value = data.get(key)
             if isinstance(value, str) and value.strip():
@@ -120,4 +122,9 @@ class CallConfig:
             cfg.usage_context = {k: usage[k].strip()[:512] for k in USAGE_CONTEXT_KEYS}
         if cfg.language == "mr" and cfg.stt_model == "deepgram/nova-3":
             cfg.stt_model = "google/gemini-3.5-transcribe-live"
+        if cfg.source == "inbound_receptionist" and (
+                not cfg.calling_service_callback or not cfg.usage_context
+                or not isinstance(data.get("objective"), str) or not data["objective"].strip()
+                or not cfg.greeting):
+            raise ValueError("Inbound receptionist dispatch requires objective, greeting, usage context and callback")
         return cfg
