@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import tempfile
 from uuid import uuid4
@@ -16,6 +15,10 @@ from datetime import datetime, timezone
 
 BASE = Path('/opt/dentnode/apps/ai.dentnode.com')
 SOURCE = Path('/opt/dentnode/apps/calling.dentnode.com/env/secrets.env')
+
+
+def assignment(line):
+    return re.match(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$', line)
 
 
 def read(path):
@@ -29,7 +32,7 @@ def env_update(text, values):
     for key, value in values.items():
         if '\n' in value or '\r' in value:
             raise ValueError('Multiline configuration is not supported')
-        positions = [i for i, line in enumerate(lines) if line.startswith(key + '=')]
+        positions = [i for i, line in enumerate(lines) if (match := assignment(line)) and match.group(1) == key]
         if len(positions) > 1:
             raise ValueError(f'Duplicate configuration key: {key}')
         if positions:
@@ -62,8 +65,16 @@ def main():
         raise RuntimeError('No active AI deployment')
     # The next rollout and rollback must both have the supervisor available.
     subprocess.run(['docker', 'exec', f'dentnode-ai-{slot}', 'python', '-c',
-                    'import runtime; assert callable(runtime.health)'], check=True)
-    source = dict(line.split('=', 1) for line in read(SOURCE).splitlines() if '=' in line and not line.startswith('#'))
+                    'import runtime; raise SystemExit(0 if callable(runtime.health) else 1)'], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    source = {}
+    for line in read(SOURCE).splitlines():
+        match = assignment(line)
+        if match:
+            key, value = match.groups()
+            if key in source:
+                raise RuntimeError(f'Duplicate source configuration key: {key}')
+            source[key] = value
     keys = ('LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET')
     if any(not source.get(key) for key in keys):
         raise RuntimeError('Calling Service is missing LiveKit configuration')
@@ -92,12 +103,15 @@ def main():
     try:
         for path, content in proposed.items():
             backup = path.with_name(path.name + '.pre-inbound-ai-' + stamp)
-            shutil.copy2(path, backup)
-            os.chmod(backup, 0o600)
+            backup_fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(backup_fd, 'wb') as handle:
+                handle.write(path.read_bytes())
+                handle.flush()
+                os.fsync(handle.fileno())
             backups[path] = backup
             atomic_write(path, content, 0o600 if path == secrets else path.stat().st_mode & 0o777)
         validation = subprocess.run(['docker', 'compose', '--env-file', str(release), '-f', str(compose),
-                        'config', '--quiet'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                        'config', '--quiet'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
         if validation.returncode:
             raise RuntimeError('Compose configuration validation failed; original configuration restored')
     except Exception:
