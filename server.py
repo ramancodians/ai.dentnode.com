@@ -54,6 +54,7 @@ from agent.d10 import D10RequestContext, UsageOutbox, run_d10_turn
 from agent.reception.router import router as reception_tools_router
 from agent.d10.usage_outbox import build_model_usage_event, build_unit_usage_event
 from agent.d10.pricing import price_call_component
+from agent.d10.clinic_summary import ClinicSummaryRequest, generate_clinic_summary
 
 # Standalone module — not part of Laby. Owns the /scan-review/* sub-namespace
 # (mesh QA from raw STL URLs); the flat POST /scan-review below is Laby's
@@ -601,6 +602,22 @@ async def d10_call_component_price(
 ) -> Dict[str, Any]:
     _require_d10_internal_key(x_d10_internal_key)
     return {"pricing": price_call_component(provider_cost_micros=int(body.provider_cost_micros), currency=body.currency, coverage=body.coverage)}
+
+
+@app.post("/d10/clinic-summary")
+async def d10_clinic_summary(
+    body: ClinicSummaryRequest,
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, str]:
+    """Generate bounded prose only; D10 owns authorization, job claims and actions."""
+    _require_d10_internal_key(x_d10_internal_key)
+    try:
+        result = await generate_clinic_summary(body, d10_usage_outbox)
+    except Exception:
+        # Never log aggregate prompts or patient-adjacent operational context.
+        logger.warning("Clinic summary generation unavailable")
+        raise HTTPException(status_code=502, detail="Clinic summary unavailable") from None
+    return result.model_dump()
 
 
 @app.post("/d10/agent/run")

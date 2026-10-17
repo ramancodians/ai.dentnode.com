@@ -253,6 +253,20 @@ class UsageOutbox:
 
         await asyncio.to_thread(_enqueue)
 
+    async def claim_model_execution(self, key: str) -> bool:
+        """A durable pre-provider claim for single-attempt background generation.
+
+        Store only the correlation key, never clinic facts or generated text.
+        A crash leaves the claim occupied: D10 returns its deterministic cache
+        and reconciles usage rather than creating another paid model request.
+        """
+        def _claim() -> bool:
+            with self._connect() as connection:
+                connection.execute("CREATE TABLE IF NOT EXISTS d10_model_execution_claim (execution_key TEXT PRIMARY KEY, claimed_at REAL NOT NULL)")
+                cursor = connection.execute("INSERT OR IGNORE INTO d10_model_execution_claim (execution_key, claimed_at) VALUES (?, ?)", (key, time.time()))
+                return cursor.rowcount == 1
+        return await asyncio.to_thread(_claim)
+
     async def _pending(self) -> list[sqlite3.Row]:
         def _read() -> list[sqlite3.Row]:
             with self._connect() as connection:
