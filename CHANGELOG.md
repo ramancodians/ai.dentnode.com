@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] - Hourly D10 clinic summary (2026-10-01)
+
+- Added internal-key protected aggregate-only summary generation; Jev ranks known facts and deterministic templates render exact counts within 200 characters.
+- Durable provider execution claims prevent duplicate paid calls. Existing usage outbox and pricing report summary/job identity without fabricated conversation IDs.
+- Eight offline identity, metering and strict-input checks passed without provider calls. Deploy AI before the D10 summary receiver/callers.
+
+
 ## [Unreleased] — Jev reception tool selection (2026-10-01)
 
 - Added optional `/reception/tools/select`: bounded Jev task-family selection
