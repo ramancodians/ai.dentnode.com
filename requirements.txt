@@ -1,7 +1,11 @@
 # google-adk provides the agent framework; litellm routes every model through
 # OpenRouter via google.adk.models.lite_llm.LiteLlm ("openrouter/..." models).
 google-adk>=2.0.0,<3.0.0
-litellm>=1.50.0
+# LiteLLM 1.106.2 imports its optional MCP support during ordinary OpenRouter
+# completions. Without the extra, every Laby model turn fails before the request
+# is sent with ModuleNotFoundError: No module named 'mcp'. Pin the tested version
+# and install the matching extra until the upstream import path is corrected.
+litellm[mcp]==1.106.2
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 httpx>=0.27.0

@@ -14,6 +14,9 @@ WORKDIR /app
 # Install deps first for layer caching.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Catch missing LiteLLM optional dependencies before publishing an image. A
+# healthy HTTP endpoint alone does not exercise the first Laby model call.
+RUN python -c "from litellm.responses.mcp.chat_completions_handler import acompletion_with_mcp"
 
 # App code.
 COPY server.py .
