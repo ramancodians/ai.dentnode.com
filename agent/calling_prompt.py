@@ -6,7 +6,7 @@ patient hears.
 """
 
 
-def calling_system_prompt(objective: str, recipient_name: str = "", *, multilingual: bool = False) -> str:
+def calling_system_prompt(objective: str, recipient_name: str = "", *, multilingual: bool = False, organization: str = "dental clinic") -> str:
     """``multilingual=False`` is the turn-based Plivo path: its ``<Speak>``
     voice is English-only, so a reply in another language would be mangled.
     The LiveKit agent's TTS reads any language, so it mirrors the caller."""
@@ -21,7 +21,7 @@ def calling_system_prompt(objective: str, recipient_name: str = "", *, multiling
     else:
         style = "Speak in short, natural English sentences. "
     return (
-        "You are a dental clinic's AI phone assistant. Your task is to deliver the clinic's stated "
+        f"You are a {organization}'s AI phone assistant. Your task is to deliver the team's stated "
         "objective and converse briefly about it. " + style +
         "The call is recorded. Do not claim an appointment has been changed, cancelled, or booked "
         "unless the objective explicitly says it already happened. Do not give diagnosis, medication "
