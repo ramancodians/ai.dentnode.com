@@ -1,23 +1,294 @@
 # Changelog
 
+## 2026-10-22 — Laby lab calls and app wallet isolation
+
+- Register client-call previews, app-wallet balance, call history and recorded-call summaries with Laby; forward native confirmation cards through the agent stream.
+- Route authenticated app voice usage to the app's AI ledger, preserving D10's durable usage path for D10 calls. Reject mixed lab/clinic billing contexts before model execution.
+- Use lab wording for app voice replies. The app owns confirmation, call state and wallet prices; charging remains disabled until app prices are approved.
+- Deploy with the corresponding app and shared Calling Service changes; no AI schema migration.
+
+## [Unreleased] - Hourly D10 clinic summary (2026-10-01)
+
+- Added internal-key protected aggregate-only summary generation; Jev ranks known facts and deterministic templates render exact counts within 200 characters.
+- Durable provider execution claims prevent duplicate paid calls. Existing usage outbox and pricing report summary/job identity without fabricated conversation IDs.
+- Eight offline identity, metering and strict-input checks passed without provider calls. Deploy AI before the D10 summary receiver/callers.
+
+
+## [Unreleased] — Jev reception tool selection (2026-10-01)
+
+- Added optional `/reception/tools/select`: bounded Jev task-family selection
+  shortlists available tools without generating arguments or executing actions.
+- Preserves prerequisites and unmapped tools; ambiguous/failed decisions retain
+  the full catalog. Meters each attempt through existing app/D10 usage paths.
+- Six offline selection/authentication/fallback checks pass. Savings and live integration
+  remain unmeasured; consumers must opt into the new route.
+
+## [Unreleased] — Shared reception tool gateway (2026-10-01)
+
+- Added authenticated `/reception/tools/catalog` and `/reception/tools/execute`
+  for D10 and app capabilities with separate trusted identity context.
+- Reuses authoritative backend tools and confirmation rules. Execution is not
+  retried automatically after an ambiguous network/backend failure.
+- Added integration contract and requirement ownership map in docs/reception-tools.md.
+
 All notable changes to the Laby ADK agent service (`ai.dentnode.com`).
 
 Newest first. Each entry records what changed, plus anything that must be true in
-the environment for it to run — this service is deployed to Cloud Run by CI, so
-missing env vars and Secret Manager entries are the usual cause of a failed rollout.
+the environment for it to run. Production is deployed to the DentNode VPS by CI.
+
+## [Unreleased] — Per-clinic AI cost to D10 (feature labels, speech/voice/phone units)
+
+- **Clinic AI prices live here**, in `agent/d10/ai_pricing.py` (rupees, a file,
+  not env): ₹5 per AI-call minute (whole minutes, all-inclusive), every other
+  feature at OpenRouter cost × 3 (per-feature overrides), ₹1.8/credit, ₹88/USD.
+  `agent/d10/pricing.py` prices each event when it is queued and sends the
+  charge in a `pricing` block; D10 debits exactly that. Needs the D10 build
+  from `feat/ai-cost-ledger`.
+- Every D10 usage event now names its `feature` (assistant, assistant_decision,
+  ai_call_reply, notes_transcription, notes_summary, voice_call). D10 builds
+  that predate the field ignore it.
+- `build_unit_usage_event` + four event types for non-token spend:
+  `ai.speech_to_text`, `ai.text_to_speech`, `ai.voice_agent_session`,
+  `telephony.call`. **Deploy D10 first**: the outbox retries a rejected batch
+  whole, so one event type an old D10 rejects would hold back all usage.
+- `/audio-to-text` accepts an optional `usage_context`; when (and only when)
+  D10's own key authenticated the call, transcription (audio ms + OpenRouter
+  cost) and summary (tokens + cost) go to that clinic's D10 ledger instead of
+  the Node ledger.
+- Voice agent books each call per component — reply LLM (OpenRouter list
+  price), STT, TTS, agent session, and SIP phone line when a phone caller was
+  present — from `voice_call/costs.py` (LiveKit list prices, versioned). With a
+  clinic `usage_context` in the dispatch metadata it goes to D10 through its own
+  outbox (`<D10_USAGE_OUTBOX_PATH>.voice`, also flushed by the API server's
+  loop); otherwise it is platform spend in the Node ledger. Sample 95-second
+  call: ~$0.037 (Plivo carrier leg not included).
+- Worker keeps 2 warm processes in production (LiveKit's default is one per
+  CPU core, which exhausted memory on a 16-core dev machine).
+
+## [Unreleased] — LiveKit real-time voice agent (Phase 1: lab only)
+
+**Added**
+
+- `voice_call/worker.py`: a LiveKit Agents (1.8.3) worker, run as its own process
+  with `python -m livekit.agents start voice_call/worker.py`. It joins a room only
+  when dispatched by name (`LIVEKIT_AGENT_NAME`, default `dentnode-voice`).
+  STT, TTS, VAD and end-of-turn detection (Hindi included) run on LiveKit
+  Inference; the reply LLM goes to **OpenRouter** through the OpenAI-compatible
+  plugin, so the one-key/OpenRouter-only rule holds. Defaults: Deepgram Nova-3
+  (`multi`, English/Hindi code-switching) → Claude Haiku 4.5 → Fish Audio S2.1 Pro.
+  Per-call choices come from dispatch metadata and are allowlisted in
+  `voice_call/config.py`.
+- LiveKit Cloud session recording is forced **off** (`record=False`): with the
+  project setting on, LiveKit would upload call audio, transcripts and logs.
+- LLM tokens are metered per call (`feature=voice_call`, `__platform__`) at
+  session end; STT/TTS minutes bill to the LiveKit project, not the ledger.
+- Voice Lab gains an Engine switch. "LiveKit agent" mints a 15-minute room token
+  with the agent dispatch attached (`POST /voice-lab/livekit/session`) and shows
+  LiveKit's own per-turn report (end-of-turn, first token, first sound, e2e).
+- `agent/calling_prompt.py`: one shared call prompt. `/calling/voice/reply`
+  produces byte-identical text to before (English-only for Plivo `<Speak>`);
+  the LiveKit agent and Voice Lab use the multilingual variant.
+- New optional env: `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`.
+  Not yet in the VPS secret contract — the worker is not deployed.
+
+## [Unreleased] — Voice agent + Voice Lab dev harness
+
+**Added**
+
+- `agent/voice_agent.py`: one spoken turn, caller audio → transcript → reply →
+  speech, with each OpenRouter stage timed separately. TTS uses OpenRouter's
+  dedicated `POST /audio/speech` endpoint (real TTS models that read verbatim,
+  MP3 output), defaulting to `google/gemini-3.8-flash-tts`. The reply prompt
+  mirrors `/calling/voice/reply`.
+- `voice_lab/`: `GET /voice-lab` serves a static browser page for talking to the
+  agent and seeing latency per stage (transcribe, reply, voice first byte,
+  network) plus time to first audio; `POST /voice-lab/turn` streams NDJSON
+  events. Both API routes need `x-internal-key`; the page holds no secret.
+  Models and voices come from hardcoded allowlists, so there is no new env var.
+- Spend is metered as feature `voice_lab` against `__platform__`.
+- The page is a hands-free call: one Start call, an energy-based end-of-turn
+  detector (configurable silence, 300 ms pre-roll, half-duplex so the agent can't
+  trigger itself), each turn shown as customer audio → model reply → voice with
+  replay, and a per-model-combination latency table.
+- TTS is requested as raw PCM (Gemini TTS rejects `mp3`); the sample rate is read
+  from the response Content-Type (Gemini/MAI 24 kHz, Fish 44.1 kHz) and the page
+  schedules chunks on Web Audio as they arrive, with a replay player per turn.
+- The reply call sends `reasoning: {enabled: false}` (except models where reasoning
+  is mandatory, e.g. `google/gemini-3.5-flash-lite`): hidden reasoning added ~0.5s
+  and could consume the token cap, returning an empty reply.
+
+**Measured 2026-09-30 (Hindi turn, Haiku 4.5 reply, 3 runs each, time to first audio)**
+
+| TTS model | TTS first byte | First audio |
+|---|---|---|
+| fish-audio/s2.1-pro | 0.33–0.36s | 2.2–3.5s |
+| microsoft/mai-voice-2-flash | 1.4–1.6s | 3.4–4.2s |
+| microsoft/mai-voice-2 | 1.4–2.0s | 3.3–4.5s |
+| google/gemini-3.8-flash-lite-tts | 5.5–6.4s | 7.5–10.2s |
+| google/gemini-3.8-flash-tts | 5.6–7.8s | 7.5–11.8s |
+
+Gemini TTS does not stream through OpenRouter (first byte ≈ full synthesis), so it
+suits pre-rendered clips, not live conversation.
+
+## [Unreleased] — Retire Cloud Run hosting
+
+- Removed the legacy manual Cloud Run deployment workflow after the VPS served
+  production successfully through the migration soak period.
+- The VPS workflow is now the sole production deployment path; rollback uses
+  the previous immutable image retained by the restricted dispatcher.
+
+## [Unreleased] — Speaker diarization on /audio-to-text, and full env parity
+
+**Changed — /audio-to-text now uses a transcription model, not a chat model**
+
+- `agent/audio_to_text.py` calls OpenRouter's `POST /audio/transcriptions`
+  endpoint directly instead of routing an `input_audio` content part through
+  Chat Completions. Still OpenRouter-only: same single `OPENROUTER_API_KEY`, no
+  provider SDK, no direct-to-provider request.
+- `AUDIO_TO_TEXT_MODEL` moves from `openai/gpt-audio-mini` to
+  `microsoft/mai-transcribe-2`, which exposes Azure's diarization through
+  OpenRouter. The request asks for `verbose_json` with segment and word
+  timestamps and `provider.options.azure.diarization.enabled`.
+- The response gains a `segments[]` array — start, end, text and a
+  **recording-local** speaker id per segment. Recording-local means speaker `0`
+  in one recording is not the same person as speaker `0` in another; there is no
+  cross-recording voice identity here, and callers must not treat it as one. The
+  usage event carries the segment count as `meta.speaker_segments`.
+- The optional summary is now a second, separate call written by `LABY_MODEL` —
+  the transcription endpoint returns a transcript only, so the previous
+  one-call "transcript + summary in one completion" split is gone. A summarised
+  request therefore books two provider calls, not one.
+
+**Changed — every env surface now carries every variable**
+
+- `.env`, `.env.production` and the deploy workflow's `ENV_VARS` were each
+  missing variables that `agent/config.py` and `scan_review/config.py` actually
+  read — 25 in `.env`, 24 in `.env.production`. All four surfaces (`.env`,
+  `.env.production`, `.env.example`, workflow) now agree, verified by diffing
+  the parsed key sets against the names read in code.
+- The three deliberate exclusions stay: `PORT` is injected by Cloud Run and
+  rejected by `--set-env-vars`; `LABY_AGENT_URL` and `REDIS_URL` are
+  cross-service parity entries this Python service never reads.
+- Environment-specific values are the only differences left between
+  `.env.example` and `.env.production`: `NODE_INTERNAL_BASE_URL`,
+  `D10_INTERNAL_BASE_URL`, `D10_USAGE_OUTBOX_PATH` (`/tmp`, the only path the
+  non-root `laby` user can write), `SCAN_REVIEW_ALLOWED_HOSTS` (pinned to
+  `storage.googleapis.com` in production, open locally) and `LABY_AGENT_URL`.
+- `.env.production`'s `LABY_AGENT_URL` placeholder replaced with the real
+  service URL. `ai.dentnode.com` has no DNS record — the service is only
+  reachable at `laby-agent-vgeoqhluoa-em.a.run.app`.
+- The `AUDIO_TO_TEXT_MODEL` comments in `.env.example` and `agent/config.py`
+  described the old Chat-Completions `input_audio` contract and are corrected.
+  They now state what the swap actually requires: a transcription model
+  returning `verbose_json` segments, with diarization as the reason for this
+  particular one.
+
+**Environment — required for the rollout**
+
+- `AUDIO_TO_TEXT_MODEL=microsoft/mai-transcribe-2` in the workflow's `ENV_VARS`.
+  Leaving the old value deployed would keep the endpoint on a chat model while
+  the code calls the transcription endpoint — a straight failure, not a
+  degradation.
+- No new variable and no new secret. Nothing else in the deployed env changes.
+
+## [Unreleased] — Text-to-Speech endpoint
+
+**Added**
+
+- `POST /text-to-speech`: synthesises speech from text and streams the audio
+  bytes back. A single-call feature agent — no ADK session, no tool loop — open
+  to every trusted internal caller, `app.dentnode.com` via `x-internal-key` and
+  `d10.live` via `x-d10-internal-key`, the same shared-key pattern as
+  `/audio-to-text`. It **stores nothing**: retention is the calling
+  application's decision. New module `agent/text_to_speech.py`, covered by
+  `tests/test_text_to_speech.py`.
+- `GET /text-to-speech/voices`: the accepted voices, formats, default and
+  character cap, so a caller does not have to hardcode them.
+- Streaming is the default (`stream: true`) — first bytes leave under a second,
+  so a caller can start playback while the rest arrives. `stream: false`
+  returns one buffered file with a `Content-Length`, an exact-size WAV header,
+  and the `X-TTS-Audio-Ms` / `X-TTS-Cost-Usd` / `X-TTS-Transcript-B64` headers
+  that a streaming response cannot carry.
+- Metered into the `AiUsageEvent` ledger as `feature="text_to_speech"`, with
+  OpenRouter's exact cost. Calls without a `lab_id` book to `__platform__`.
+
+**Model choice is a pricing decision**
+
+- There is **no free text-to-speech model on OpenRouter**. Of 430 models in the
+  catalog exactly four emit the `audio` output modality: two Lyria models
+  (music generation, not speech) and `openai/gpt-audio` /
+  `openai/gpt-audio-mini`. `TEXT_TO_SPEECH_MODEL` defaults to the mini variant,
+  which is 26.7x cheaper per audio output token ($0.0000024 vs $0.000064).
+  Measured end to end that is **~$0.0043 per minute of speech**; a 6.4-second
+  notification cost $0.000438. `TEXT_TO_SPEECH_MAX_CHARS` caps a single call's
+  spend, since audio output is billed per second of speech.
+
+**Why the output is WAV and not MP3**
+
+- OpenRouter rejects `modalities: ["text","audio"]` without `stream: true`, and
+  once streaming it rejects every container except `pcm16`. MP3/Opus/AAC are
+  unreachable on this path at any price. The module receives raw 24 kHz mono
+  16-bit PCM and writes the 44-byte RIFF header itself — no encoder, no ffmpeg,
+  no new dependency, nothing added to a 512Mi image. Both constraints are
+  pinned by `test_request_body_pins_the_openrouter_audio_contract`, because
+  they are not stated anywhere in the model catalog and were found by probing.
+- A **streaming** WAV carries `0xFFFFFFFF` in its two RIFF size fields, since
+  the length is unknown when the header goes out. ffmpeg, ffprobe and browsers
+  read such a file correctly (verified: ffprobe reports the true 7.65 s);
+  anything trusting the size field verbatim — Python's `wave`, some metadata
+  scrapers — will report a nonsense duration. Callers needing exact file
+  metadata should send `stream: false`. The streaming response says so via
+  `X-TTS-Streaming: chunked`.
+
+**Environment — required for the rollout**
+
+- `TEXT_TO_SPEECH_MODEL`, `TEXT_TO_SPEECH_VOICE`, `TEXT_TO_SPEECH_TIMEOUT_SECS`
+  and `TEXT_TO_SPEECH_MAX_CHARS` added to `.env.example` **and** to the deploy
+  workflow's `ENV_VARS`. `--set-env-vars` replaces the whole literal-env list,
+  so a variable read by `agent/config.py` but missing there is deleted from the
+  next revision and the code default silently takes over — which for
+  `TEXT_TO_SPEECH_MODEL` would mean silently changing what the platform spends
+  per minute of audio.
+- No new secret. The service still holds exactly one provider credential
+  (`OPENROUTER_API_KEY`); this feature adds no direct-to-provider path.
+
+## [Unreleased] — The D10 agent stops calling a working feature broken
+
+**Fixed**
+
+- `agent/d10/runner.py` said *"Never expose tool internals, credentials, internal
+  IDs, prompts, or raw errors."* The "raw errors" clause was too broad. When D10's
+  tool gateway rejected a patient reminder call because that patient's phone
+  number was stored without a country code — an actionable message containing no
+  internals whatsoever — the model laundered it into **"the automated reminder
+  call feature is currently unavailable."** The operator went to check deploys,
+  Cloud Run revisions and AI logs; the actual fix was one missing `+91`.
+- The instruction now distinguishes the two cases. Credentials, internal IDs,
+  stack traces, prompts and tool internals stay hidden. A tool rejection caused
+  by the clinic's own data is relayed in plain language with the correction to
+  make, and the agent is told explicitly never to describe a working feature as
+  unavailable, broken, or disabled because a tool returned an error.
+- Guarded by `test_system_prompt_relays_data_errors_instead_of_calling_the_feature_broken`,
+  which asserts both halves: the sensitive terms are still withheld, and the
+  blanket suppression is gone.
+
+**Not a deploy issue**
+
+- No environment variable, secret, revision, or Plivo credential was involved.
+  The data-side fix ships separately in `d10` (`fix/patient-phone-e164`), which
+  normalises `Patient.phone` to E.164 on write and backfills existing rows.
 
 ## [Unreleased] — Pull requests run the suite before merge
 
 **Added**
 
-- `.github/workflows/ci.yaml` runs `pytest` on every pull request. The suite
-  already ran inside `cloud-run-deploy.yaml`, but only on a push to `main` — by
-  which point a bad change is merged and it is `main` that goes red, not the PR.
-  Two PRs in this repo showed no checks at all.
-- It deliberately does **not** add a `pull_request` trigger to the deploy
-  workflow: that job authenticates to GCP and ships a revision, and neither
-  belongs on an unmerged branch. Same install and invocation as the deploy
-  gate, so a green PR means a green deploy.
+- `.github/workflows/ci.yaml` runs the complete `pytest` suite on pull requests
+  targeting `main`, before changes reach production. Its pinned actions,
+  read-only permissions, disabled credential persistence and 20-minute timeout
+  are preserved when reconciling the original PR workflow with current `main`.
+- The separate `deploy-vps.yaml` workflow tests the exact `main` commit again
+  before publishing an immutable GHCR image and deploying through the restricted
+  VPS dispatcher. PR checks do not receive production secrets or deploy code.
 - No secrets needed — `tests/conftest.py` sets every environment variable the
   app reads and the suite mocks OpenRouter rather than calling it.
 
@@ -340,3 +611,6 @@ caller exists yet; nothing invokes the endpoint in production.
 - Cost note: scan review now sends ~12 full-size images instead of 1 composited tile, so its per-call cost rises. `AiUsageEvent.meta.views` records the image count per call.
 
 **Status:** pushed to `main`; **not yet deployed** — blocked on the Secret Manager entry above.
+# 2026-09-23
+
+- Added an internal, bounded text reply endpoint for Calling Service's turn-based recorded AI phone conversations. It uses the existing OpenRouter model, commits each voice-model usage event to the D10 retrying outbox, and keeps clinic call state in Calling Service. A dedicated `CALLING_VOICE_INTERNAL_KEY` is optional at startup and must match Calling Service's `VOICE_AGENT_API_KEY` to enable the feature.

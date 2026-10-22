@@ -178,6 +178,7 @@ async def run_turn(
                                 "chart_hint": payload.get("chart_hint"),
                                 "notes": payload.get("notes"),
                                 "export": payload.get("export"),
+                                "call_draft": payload.get("call_draft"),
                                 "entity_ids": payload.get("entity_ids"),
                             }
                         continue

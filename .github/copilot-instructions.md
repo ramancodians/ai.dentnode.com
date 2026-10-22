@@ -1,5 +1,9 @@
 # DentNode AI Microservice (ai.dentnode.com)
 
+<!-- dentnode-platform-context-ref:start -->
+> Platform baseline: apply the nearest repository `AGENTS.md` and the workspace instructions in `C:\Users\raman\dentnode\AGENTS.md`. The current hosting record is `knowledge/ops/GCP to VPS Migration Completion — 2026-09-19.md`: app and AI production are VPS-only; Cloud Run must not be reintroduced implicitly.
+<!-- dentnode-platform-context-ref:end -->
+
 AI brain for the DentNode ecosystem — RAG chat, vision scanning, webhook-driven sync, token quotas.
 
 ## Architecture

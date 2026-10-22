@@ -43,7 +43,22 @@ _DEFAULT_TIMEOUT_SECS = 60.0
 
 
 class OpenRouterError(RuntimeError):
-    """Raised on any HTTP, timeout, or transport failure talking to OpenRouter."""
+    """Sanitized provider failure safe to expose to service logs.
+
+    ``code`` is stable for metrics/control flow. ``message`` must never contain
+    provider response bodies, prompts, transcripts, or patient data.
+    """
+
+    def __init__(
+        self,
+        message: str = "OpenRouter request failed",
+        *,
+        code: str = "openrouter_error",
+        status_code: Optional[int] = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
 
 
 @dataclass
@@ -136,7 +151,10 @@ async def chat_completion(
         OpenRouterError: on missing key, HTTP error status, or transport/timeout.
     """
     if not settings.openrouter_api_key:
-        raise OpenRouterError("OPENROUTER_API_KEY is not configured")
+        raise OpenRouterError(
+            "OpenRouter is not configured",
+            code="not_configured",
+        )
 
     slug = _strip_route_prefix(model)
 
@@ -167,25 +185,37 @@ async def chat_completion(
     try:
         async with httpx.AsyncClient(timeout=timeout_secs) as client:
             resp = await client.post(url, json=body, headers=headers)
-    except httpx.HTTPError as exc:
-        raise OpenRouterError(f"OpenRouter request failed: {exc}") from exc
+    except httpx.HTTPError:
+        raise OpenRouterError(
+            "OpenRouter request failed",
+            code="transport_error",
+        ) from None
 
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     if resp.status_code >= 400:
-        detail = resp.text[:300]
         raise OpenRouterError(
-            f"OpenRouter returned {resp.status_code}: {detail}"
+            "OpenRouter request failed",
+            code="provider_http_error",
+            status_code=resp.status_code,
         )
 
     try:
         data = resp.json()
-    except Exception as exc:  # noqa: BLE001
-        raise OpenRouterError(f"OpenRouter returned non-JSON body: {exc}") from exc
+    except Exception:  # noqa: BLE001
+        raise OpenRouterError(
+            "OpenRouter returned an invalid response",
+            code="invalid_response",
+            status_code=resp.status_code,
+        ) from None
 
     choices = data.get("choices") or []
     if not choices:
-        raise OpenRouterError("OpenRouter response had no choices")
+        raise OpenRouterError(
+            "OpenRouter returned an invalid response",
+            code="missing_choices",
+            status_code=resp.status_code,
+        )
 
     message = choices[0].get("message") or {}
     text = message.get("content") or ""

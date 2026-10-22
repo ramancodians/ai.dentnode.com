@@ -149,7 +149,9 @@ def sniff_audio_format(data: bytes, url: str, content_type: Optional[str]) -> st
     head = data[:_SNIFF_BYTES]
     if head[:4] == b"RIFF" and data[8:12] == b"WAVE":
         return "wav"
-    if head[:3] == b"ID3" or (head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
+    if head[:3] == b"ID3" or (
+        len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
+    ):
         return "mp3"
     if head[:4] == b"fLaC":
         return "flac"

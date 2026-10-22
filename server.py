@@ -9,36 +9,52 @@ shared x-internal-key or x-internal-id. It is deployed to Cloud Run with --ingre
 """
 
 import asyncio
+import base64
+import hmac
 import json
 import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+from types import SimpleNamespace
 
-from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field, model_validator
 
-from agent.audio_fetch import AudioFetchError, fetch_audio
-from agent.audio_to_text import UnsupportedAudioFormat, transcribe_audio
+from agent.audio_fetch import AudioFetchError, fetch_audio, sniff_audio_format
+from agent.audio_to_text import AudioSummaryError, UnsupportedAudioFormat, transcribe_audio
+from agent.calling_prompt import calling_system_prompt
 from agent.case_from_image import CaseExtractionError, extract_case_from_image
 from agent.config import settings
 from agent.insights import generate_insights
 from agent.image_to_entry import ImageToEntryResult, image_to_entry
 from agent.logging_setup import setup_logging
 from agent.marketing_copy import generate_product_update_email
-from agent.openrouter import OpenRouterError
+from agent.openrouter import OpenRouterError, chat_completion
 from agent.rejected_cases import (
     RejectedCasesParseError,
     generate_rejected_cases_report,
 )
 from agent.rx_review import generate_rx_review
 from agent.runner import run_turn
+from agent.text_to_speech import (
+    SUPPORTED_FORMATS,
+    SUPPORTED_VOICES,
+    SpeechMeta,
+    SpeechStream,
+    media_type_for,
+    validate_request as validate_speech_request,
+)
 from agent.browser_runner import run_browser_turn
 from agent.scan_review import generate_scan_review
 from agent.usage import report_usage
 from agent.d10 import D10RequestContext, UsageOutbox, run_d10_turn
+from agent.reception.router import router as reception_tools_router
+from agent.d10.usage_outbox import build_model_usage_event, build_unit_usage_event
+from agent.d10.pricing import price_call_component
+from agent.d10.clinic_summary import ClinicSummaryRequest, generate_clinic_summary
 
 # Standalone module — not part of Laby. Owns the /scan-review/* sub-namespace
 # (mesh QA from raw STL URLs); the flat POST /scan-review below is Laby's
@@ -49,12 +65,99 @@ from scan_review.config import settings as scan_review_settings
 # Segmentation-conditioned scan QA. Owns /scan-qa/*; findings carry mesh
 # coordinates so the DN3D viewer can pin them to the model.
 from scan_qa import scan_qa_router
+# Voice Lab — dev harness for talking to the voice agent and timing each stage.
+from voice_lab import voice_lab_router
+from telemetry import configure_telemetry
 
 # Wire JSON logging before the first log line is emitted.
 setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
 d10_usage_outbox = UsageOutbox(settings.d10_usage_outbox_path)
+# Written by the LiveKit voice worker (a separate process); this server retries
+# whatever a call could not deliver to D10 when it ended.
+d10_voice_usage_outbox = UsageOutbox(settings.d10_usage_outbox_path + ".voice")
+
+
+class CallAudioIngressMiddleware:
+    """Authenticate and cap call-audio requests before multipart parsing.
+
+    FastAPI resolves ``UploadFile`` after Starlette has already spooled every
+    multipart file. This pure ASGI guard runs outside routing, checks the key
+    without consuming the body, then buffers only a bounded sequence of ASGI
+    messages for replay into the multipart parser.
+    """
+
+    _PATH = "/internal/call-audio/analyze"
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or scope.get("path") != self._PATH:
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        provided = headers.get(b"x-internal-key") or headers.get(b"x-internal-id")
+        expected = settings.internal_key.encode("utf-8")
+        if not expected or not provided or not hmac.compare_digest(provided, expected):
+            response = JSONResponse(
+                status_code=401,
+                content={"success": False, "error": "Invalid internal key"},
+            )
+            await response(scope, receive, send)
+            return
+
+        max_bytes = settings.call_audio_request_max_bytes
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > max_bytes:
+                    response = JSONResponse(
+                        status_code=413,
+                        content={"success": False, "error": "Request body is too large"},
+                    )
+                    await response(scope, receive, send)
+                    return
+            except ValueError:
+                response = JSONResponse(
+                    status_code=400,
+                    content={"success": False, "error": "Invalid Content-Length"},
+                )
+                await response(scope, receive, send)
+                return
+
+        messages = []
+        total = 0
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message.get("type") == "http.request":
+                total += len(message.get("body", b""))
+                if total > max_bytes:
+                    response = JSONResponse(
+                        status_code=413,
+                        content={"success": False, "error": "Request body is too large"},
+                    )
+                    await response(scope, receive, send)
+                    return
+                if not message.get("more_body", False):
+                    break
+            elif message.get("type") == "http.disconnect":
+                break
+
+        message_index = 0
+
+        async def replay_receive():
+            nonlocal message_index
+            if message_index < len(messages):
+                message = messages[message_index]
+                message_index += 1
+                return message
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self.app(scope, replay_receive, send)
 
 
 @asynccontextmanager
@@ -70,26 +173,50 @@ async def lifespan(_app: FastAPI):
             "are reachable. Never use this outside local development."
         )
     await d10_usage_outbox.initialize()
+    await d10_voice_usage_outbox.initialize()
     d10_outbox_task = asyncio.create_task(
         d10_usage_outbox.run(settings.d10_usage_flush_interval_secs)
+    )
+    d10_voice_outbox_task = asyncio.create_task(
+        d10_voice_usage_outbox.run(settings.d10_usage_flush_interval_secs)
     )
     try:
         yield
     finally:
         d10_usage_outbox.stop()
-        try:
-            await asyncio.wait_for(d10_outbox_task, timeout=5.0)
-        except asyncio.TimeoutError:
-            d10_outbox_task.cancel()
+        d10_voice_usage_outbox.stop()
+        for task in (d10_outbox_task, d10_voice_outbox_task):
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                task.cancel()
         # Best effort only: records are already committed locally and will be
         # retried on the next startup if D10 is temporarily unavailable.
         await d10_usage_outbox.flush_once()
+        await d10_voice_usage_outbox.flush_once()
 
 
 app = FastAPI(title="Laby ADK Agent", version="1.0.0", lifespan=lifespan)
+app.add_middleware(CallAudioIngressMiddleware)
 
 app.include_router(scan_review_router)
 app.include_router(scan_qa_router)
+app.include_router(voice_lab_router)
+app.include_router(reception_tools_router)
+configure_telemetry(app)
+
+
+# Uploaded call recordings are accepted only in formats the configured
+# transcription provider supports directly. Never infer a codec from a filename
+# or accept application/octet-stream: this route is an internal byte boundary,
+# not a general-purpose file upload.
+CALL_AUDIO_MIME_FORMATS = {
+    "audio/wav": frozenset({"wav"}),
+    "audio/x-wav": frozenset({"wav"}),
+    "audio/mpeg": frozenset({"mp3"}),
+    "audio/flac": frozenset({"flac"}),
+    "audio/mp4": frozenset({"m4a", "mp4"}),
+}
 
 
 class HistoryTurn(BaseModel):
@@ -203,6 +330,67 @@ class AudioToTextRequest(BaseModel):
     summary: bool = True
     lab_id: Optional[str] = None
     user_id: Optional[str] = None
+    # D10 only: books the spend to this clinic in D10's usage ledger instead of
+    # app.dentnode.com's. Honoured only when D10's own key authenticated the call.
+    usage_context: Optional["D10UsageContext"] = None
+
+
+class D10UsageContext(BaseModel):
+    clinic_id: str = Field(..., min_length=1, max_length=256)
+    user_id: str = Field(..., min_length=1, max_length=256)
+    actor_id: str = Field(..., min_length=1, max_length=256)
+    conversation_id: str = Field(..., min_length=1, max_length=256)
+    source_message_id: str = Field(..., min_length=1, max_length=512)
+    correlation_id: str = Field(..., min_length=1, max_length=256)
+
+
+AudioToTextRequest.model_rebuild()
+
+
+async def _record_d10_transcription(
+    usage: D10UsageContext, result: Any, *, include_summary: bool
+) -> None:
+    """Transcription (+ summary) spend to the clinic's D10 ledger, via the outbox."""
+    context = SimpleNamespace(**usage.model_dump(), causation_id=usage.source_message_id,
+                              reservation_id=None)
+    audio_ms = int(max((float(s.get("end") or 0) for s in result.segments), default=0) * 1000)
+    await d10_usage_outbox.enqueue(build_unit_usage_event(
+        context=context, event_type="ai.speech_to_text", quantity=audio_ms,
+        feature="notes_transcription", provider="openrouter", model=result.model, sequence=1,
+        cost_usd=result.cost_usd,
+        cost_source="provider" if result.cost_usd is not None else "unknown",
+        latency_ms=result.latency_ms,
+    ))
+    if include_summary and result.summary_model:
+        await d10_usage_outbox.enqueue(build_model_usage_event(
+            feature="notes_summary", context=context, model_call_index=2, attempt=1,
+            provider="openrouter", model=result.summary_model, provider_request_id=None,
+            usage=result.summary_usage, raw_usage=None,
+            latency_ms=result.summary_latency_ms or 0, status="ok",
+            cost_usd=result.summary_cost_usd,
+        ))
+
+
+class TextToSpeechRequest(BaseModel):
+    """Open to every trusted internal caller (app.dentnode.com, d10.live, …).
+
+    The upper bound on `text` is enforced against TEXT_TO_SPEECH_MAX_CHARS in
+    the handler; the field cap here is only a cheap guard against a caller
+    posting a megabyte of prose.
+    """
+
+    text: str = Field(..., min_length=1, max_length=100_000)
+    # Falls back to TEXT_TO_SPEECH_VOICE when the caller does not care.
+    voice: Optional[str] = None
+    audio_format: str = "wav"
+    # Streaming is the default: the first bytes leave here well under a second
+    # after the request, so a caller can start playback while the rest arrives.
+    # Set false to get one buffered file with a Content-Length and an
+    # exact-size WAV header, which is what a caller that is about to upload the
+    # result somewhere actually wants.
+    stream: bool = True
+    lab_id: Optional[str] = None
+    user_id: Optional[str] = None
 
 
 # Every AiUsageEvent needs a lab_id, but the weekly product-update email is
@@ -223,6 +411,92 @@ def _fire_and_forget(coro) -> None:
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+
+
+def _meter_audio_transcription(
+    *,
+    feature: str,
+    lab_id: str,
+    result,
+    user_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    _fire_and_forget(
+        report_usage(
+            feature=feature,
+            lab_id=lab_id,
+            user_id=user_id,
+            model=result.model,
+            usage=result.usage,
+            cost=result.cost_usd,
+            cost_source="openrouter" if result.cost_usd is not None else "estimated",
+            latency_ms=result.latency_ms,
+            status="ok",
+            request_id=request_id,
+            meta={**(meta or {}), "stage": "transcription"},
+        )
+    )
+
+
+def _meter_audio_summary(
+    *,
+    feature: str,
+    lab_id: str,
+    result,
+    user_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    if result.summary_model is None:
+        return
+    _fire_and_forget(
+        report_usage(
+            feature=feature,
+            lab_id=lab_id,
+            user_id=user_id,
+            model=result.summary_model,
+            usage=result.summary_usage,
+            cost=result.summary_cost_usd,
+            cost_source=(
+                "openrouter" if result.summary_cost_usd is not None else "estimated"
+            ),
+            latency_ms=result.summary_latency_ms,
+            status="ok",
+            request_id=request_id,
+            meta={**(meta or {}), "stage": "summary"},
+        )
+    )
+
+
+def _meter_audio_summary_failure(
+    *,
+    feature: str,
+    lab_id: str,
+    result,
+    user_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> None:
+    _meter_audio_transcription(
+        feature=feature,
+        lab_id=lab_id,
+        result=result,
+        user_id=user_id,
+        request_id=request_id,
+        meta=meta,
+    )
+    _fire_and_forget(
+        report_usage(
+            feature=feature,
+            lab_id=lab_id,
+            user_id=user_id,
+            model=settings.model,
+            status="error",
+            request_id=request_id,
+            meta={**(meta or {}), "stage": "summary"},
+        )
+    )
 
 
 def _require_internal_key(provided: Optional[str]) -> None:
@@ -315,6 +589,37 @@ async def agent_run(
     )
 
 
+class CallComponentPriceRequest(BaseModel):
+    provider_cost_micros: str = Field(pattern=r"^\d{1,12}$")
+    currency: Literal["USD", "INR"]
+    coverage: Literal["metered", "ai_inclusive"]
+
+
+@app.post("/d10/pricing/call-component")
+async def d10_call_component_price(
+    body: CallComponentPriceRequest,
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, Any]:
+    _require_d10_internal_key(x_d10_internal_key)
+    return {"pricing": price_call_component(provider_cost_micros=int(body.provider_cost_micros), currency=body.currency, coverage=body.coverage)}
+
+
+@app.post("/d10/clinic-summary")
+async def d10_clinic_summary(
+    body: ClinicSummaryRequest,
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, str]:
+    """Generate bounded prose only; D10 owns authorization, job claims and actions."""
+    _require_d10_internal_key(x_d10_internal_key)
+    try:
+        result = await generate_clinic_summary(body, d10_usage_outbox)
+    except Exception:
+        # Never log aggregate prompts or patient-adjacent operational context.
+        logger.warning("Clinic summary generation unavailable")
+        raise HTTPException(status_code=502, detail="Clinic summary unavailable") from None
+    return result.model_dump()
+
+
 @app.post("/d10/agent/run")
 async def d10_agent_run(
     body: D10RunRequest,
@@ -345,6 +650,101 @@ async def d10_agent_run(
     )
 
 
+class CallingVoiceTurn(BaseModel):
+    caller: str = Field(..., max_length=1000)
+    agent: str = Field(..., max_length=900)
+
+
+class CallingVoiceUsageContext(BaseModel):
+    platform: Literal["d10", "app"] = "d10"
+    clinic_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    lab_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    user_id: str = Field(..., min_length=1, max_length=256)
+    actor_id: str = Field(..., min_length=1, max_length=256)
+    conversation_id: str = Field(..., min_length=1, max_length=256)
+    source_message_id: str = Field(..., min_length=1, max_length=512)
+    correlation_id: str = Field(..., min_length=1, max_length=256)
+    model_call_index: int = Field(..., ge=1, le=8)
+
+    @model_validator(mode="after")
+    def platform_scope(self):
+        if self.platform == "app" and (not self.lab_id or self.clinic_id):
+            raise ValueError("App calls require lab_id and cannot target D10 billing")
+        if self.platform == "d10" and (not self.clinic_id or self.lab_id):
+            raise ValueError("D10 calls require clinic_id and cannot target the app wallet")
+        return self
+
+
+class CallingVoiceRequest(BaseModel):
+    objective: str = Field(..., min_length=5, max_length=1000)
+    recipient_name: str = Field(default="", max_length=200)
+    speech: str = Field(..., min_length=1, max_length=1000)
+    history: List[CallingVoiceTurn] = Field(default_factory=list, max_length=8)
+    usage_context: CallingVoiceUsageContext
+
+
+@app.post("/calling/voice/reply")
+async def calling_voice_reply(
+    body: CallingVoiceRequest,
+    x_calling_internal_key: Optional[str] = Header(default=None, alias="x-calling-internal-key"),
+) -> Dict[str, str]:
+    """One bounded spoken reply. Calling Service owns the call and transcript."""
+    if not settings.calling_voice_internal_key or x_calling_internal_key != settings.calling_voice_internal_key:
+        raise HTTPException(status_code=401, detail="Invalid calling key")
+    messages: List[Dict[str, str]] = [{
+        "role": "system",
+        "content": calling_system_prompt(body.objective, body.recipient_name,
+                                          organization="dental lab" if body.usage_context.platform == "app" else "dental clinic"),
+    }]
+    for turn in body.history:
+        messages.append({"role": "user", "content": turn.caller})
+        messages.append({"role": "assistant", "content": turn.agent})
+    messages.append({"role": "user", "content": body.speech})
+    call_started = time.monotonic()
+    usage_context = SimpleNamespace(**body.usage_context.model_dump(),
+                                    causation_id=body.usage_context.source_message_id,
+                                    reservation_id=None)
+    async def meter_reply(**values):
+        if body.usage_context.platform == "app":
+            # App owns the inclusive call charge and wallet. Never submit an
+            # app lab ID as a D10 clinic ID, even when an account exists there.
+            await report_usage(feature="app_ai_call_reply", lab_id=body.usage_context.lab_id,
+                user_id=body.usage_context.user_id, model=values["model"],
+                usage=values.get("usage"), cost=values.get("cost_usd"),
+                cost_source="openrouter" if values.get("cost_usd") is not None else "estimated",
+                status=values["status"], latency_ms=values.get("latency_ms"),
+                request_id=f"{body.usage_context.correlation_id}:turn:{body.usage_context.model_call_index}",
+                meta={"call_id": body.usage_context.correlation_id, "included_in_app_call": True})
+        else:
+            await d10_usage_outbox.enqueue(build_model_usage_event(
+                feature="ai_call_reply", context=usage_context,
+                model_call_index=body.usage_context.model_call_index, attempt=1, **values))
+    try:
+        result = await chat_completion(
+            messages=messages, model=settings.d10_agent_model, temperature=0.2,
+            max_tokens=180, timeout_secs=10,
+        )
+    except OpenRouterError as exc:
+        await meter_reply(
+            provider="openrouter", model=settings.d10_agent_model,
+            provider_request_id=None, usage=None, raw_usage=None,
+            latency_ms=int((time.monotonic() - call_started) * 1000), status="error",
+            error_code=type(exc).__name__,
+        )
+        logger.exception("Calling voice reply failed")
+        raise HTTPException(status_code=502, detail="Voice agent unavailable")
+    await meter_reply(
+        provider=result.provider, model=result.model,
+        provider_request_id=result.request_id, usage=result.usage,
+        raw_usage=result.raw_usage, latency_ms=result.latency_ms,
+        status="ok", cost_usd=result.cost_usd,
+    )
+    reply = result.text.strip()
+    if not reply:
+        raise HTTPException(status_code=502, detail="Voice agent returned no reply")
+    return {"reply": reply[:900]}
+
+
 @app.post("/audio-to-text")
 async def audio_to_text(
     body: AudioToTextRequest,
@@ -366,6 +766,17 @@ async def audio_to_text(
         raise HTTPException(status_code=400, detail=str(exc))
 
     lab_id = body.lab_id or PLATFORM_LAB_ID
+    usage_meta = {
+        "audio_bytes": audio.size_bytes,
+        "audio_format": audio.format,
+    }
+    # A clinic context is trusted only from D10 itself; app.dentnode.com and
+    # anything else keeps metering into the Node ledger as before.
+    d10_usage = body.usage_context if (
+        body.usage_context is not None and settings.d10_internal_key
+        and x_d10_internal_key is not None
+        and hmac.compare_digest(x_d10_internal_key, settings.d10_internal_key)
+    ) else None
 
     try:
         result = await transcribe_audio(
@@ -375,10 +786,30 @@ async def audio_to_text(
         )
     except UnsupportedAudioFormat as exc:
         raise HTTPException(status_code=415, detail=str(exc))
+    except AudioSummaryError as exc:
+        if d10_usage is not None:
+            await _record_d10_transcription(d10_usage, exc.transcription_result, include_summary=False)
+            raise HTTPException(status_code=502, detail="Audio-to-text model call failed")
+        _meter_audio_summary_failure(
+            feature="audio_to_text",
+            lab_id=lab_id,
+            user_id=body.user_id,
+            result=exc.transcription_result,
+            meta=usage_meta,
+        )
+        logger.error(
+            "Audio-to-text generation failed",
+            extra={"lab_id": lab_id, "error_type": type(exc).__name__},
+        )
+        raise HTTPException(status_code=502, detail="Audio-to-text model call failed")
     except OpenRouterError as exc:
         logger.error(
             "Audio-to-text generation failed",
-            extra={"lab_id": lab_id, "error": str(exc)},
+            extra={
+                "lab_id": lab_id,
+                "error_type": type(exc).__name__,
+                "error_code": exc.code,
+            },
         )
         _fire_and_forget(
             report_usage(
@@ -391,23 +822,24 @@ async def audio_to_text(
         )
         raise HTTPException(status_code=502, detail="Audio-to-text model call failed")
 
-    _fire_and_forget(
-        report_usage(
+    usage_meta["speaker_segments"] = len(result.segments)
+    if d10_usage is not None:
+        await _record_d10_transcription(d10_usage, result, include_summary=True)
+    else:
+        _meter_audio_transcription(
             feature="audio_to_text",
             lab_id=lab_id,
             user_id=body.user_id,
-            model=result.model,
-            usage=result.usage,
-            cost=result.cost_usd,
-            cost_source="openrouter" if result.cost_usd is not None else "estimated",
-            latency_ms=result.latency_ms,
-            status="ok",
-            meta={
-                "audio_bytes": result.audio_bytes,
-                "audio_format": result.audio_format,
-            },
+            result=result,
+            meta=usage_meta,
         )
-    )
+        _meter_audio_summary(
+            feature="audio_to_text",
+            lab_id=lab_id,
+            user_id=body.user_id,
+            result=result,
+            meta=usage_meta,
+        )
 
     return {
         "success": True,
@@ -416,6 +848,283 @@ async def audio_to_text(
         "model": result.model,
         "audio_format": result.audio_format,
         "audio_bytes": result.audio_bytes,
+        "segments": result.segments,
+    }
+
+
+@app.post("/internal/call-audio/analyze")
+async def analyze_call_audio(
+    file: UploadFile = File(...),
+    lab_id: str = Form(..., min_length=1, max_length=128),
+    call_id: str = Form(..., min_length=1, max_length=128),
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_internal_id: Optional[str] = Header(default=None, alias="x-internal-id"),
+) -> Dict[str, Optional[str]]:
+    """Transcribe and summarize one app-owned call recording upload.
+
+    The service is intentionally stateless. The calling app owns job and
+    ``call_id`` idempotency; this endpoint performs no remote fetch and stores
+    neither the uploaded audio nor the generated text.
+    """
+    _require_internal_key(x_internal_key or x_internal_id)
+
+    mime_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    allowed_formats = CALL_AUDIO_MIME_FORMATS.get(mime_type)
+    if allowed_formats is None:
+        raise HTTPException(status_code=415, detail="Unsupported audio type")
+
+    audio = await file.read(settings.audio_to_text_max_bytes + 1)
+    await file.close()
+    if not audio:
+        raise HTTPException(status_code=400, detail="Audio file is empty")
+    if len(audio) > settings.audio_to_text_max_bytes:
+        raise HTTPException(status_code=413, detail="Audio file is too large")
+
+    try:
+        audio_format = sniff_audio_format(audio, "", mime_type)
+    except AudioFetchError:
+        raise HTTPException(status_code=415, detail="Invalid audio content")
+    if audio_format not in allowed_formats:
+        raise HTTPException(
+            status_code=415,
+            detail="Audio content does not match declared type",
+        )
+
+    usage_meta = {"audio_bytes": len(audio), "audio_format": audio_format}
+
+    try:
+        result = await transcribe_audio(
+            audio_bytes=audio,
+            audio_format=audio_format,
+            summary=True,
+        )
+    except AudioSummaryError as exc:
+        _meter_audio_summary_failure(
+            feature="call_audio_analysis",
+            lab_id=lab_id,
+            result=exc.transcription_result,
+            request_id=call_id,
+            meta=usage_meta,
+        )
+        logger.error(
+            "Call audio analysis failed",
+            extra={"lab_id": lab_id, "error_type": type(exc).__name__},
+        )
+        raise HTTPException(status_code=502, detail="Call audio analysis failed")
+    except Exception as exc:  # provider errors must never expose call content
+        logger.error(
+            "Call audio analysis failed",
+            extra={"lab_id": lab_id, "error_type": type(exc).__name__},
+        )
+        _fire_and_forget(
+            report_usage(
+                feature="call_audio_analysis",
+                lab_id=lab_id,
+                model=settings.audio_to_text_model,
+                status="error",
+                request_id=call_id,
+                meta={**usage_meta, "stage": "transcription"},
+            )
+        )
+        raise HTTPException(status_code=502, detail="Call audio analysis failed")
+
+    _meter_audio_transcription(
+        feature="call_audio_analysis",
+        lab_id=lab_id,
+        result=result,
+        request_id=call_id,
+        meta=usage_meta,
+    )
+    _meter_audio_summary(
+        feature="call_audio_analysis",
+        lab_id=lab_id,
+        result=result,
+        request_id=call_id,
+        meta=usage_meta,
+    )
+
+    return {"transcript": result.transcript, "summary": result.summary}
+
+
+# Keeps X-TTS-Transcript-B64 inside a typical 8 KB per-header proxy limit even
+# when every character is multi-byte.
+_TRANSCRIPT_HEADER_MAX_CHARS = 1024
+
+
+def _speech_headers(meta: SpeechMeta, *, streaming: bool) -> Dict[str, str]:
+    """Metadata sidecar for a binary body.
+
+    The response body is audio, so everything a caller might want to log,
+    display or bill against has to ride in headers. They are ASCII-safe by
+    construction except the transcript, which is base64 so a non-Latin-1 script
+    (Hindi, say) cannot make the response unencodable.
+    """
+    headers = {
+        "X-TTS-Model": meta.model,
+        "X-TTS-Voice": meta.voice,
+        "X-TTS-Format": meta.audio_format,
+        "X-TTS-Sample-Rate": str(meta.sample_rate),
+        "X-TTS-Channels": str(meta.channels),
+        "Content-Disposition": f'attachment; filename="speech.{meta.audio_format}"',
+        "Cache-Control": "no-store",
+    }
+    if streaming:
+        # Nothing below is known until the stream drains, so a streaming
+        # response cannot carry it — the caller gets it from the ledger.
+        #
+        # The flag is worth stating because a chunked WAV is not byte-identical
+        # to a buffered one: its two RIFF size fields hold the streaming
+        # sentinel, since the length is unknown when the header goes out.
+        # ffprobe, browsers and ffmpeg all read such a file correctly, but
+        # anything that trusts the size field verbatim (Python's `wave`, some
+        # metadata scrapers) will report a nonsense duration. A caller that
+        # needs exact metadata on the file itself should send stream=false.
+        headers["X-TTS-Streaming"] = "chunked"
+        headers["X-Accel-Buffering"] = "no"
+        return headers
+    headers.update({
+        "X-TTS-Audio-Ms": str(meta.duration_ms),
+        "X-TTS-Latency-Ms": str(meta.latency_ms),
+        "X-TTS-Cost-Usd": f"{meta.cost_usd:.8f}" if meta.cost_usd is not None else "",
+        # What the model actually said. Compare it against the text you sent to
+        # detect the one real failure mode of using a chat model as a TTS
+        # engine: it answering the text instead of reading it.
+    })
+    # Header budget: 4000 characters of Devanagari is ~12 KB of UTF-8 and ~16 KB
+    # of base64, past what most proxies accept in a single header. Truncating
+    # the source keeps the response deliverable; a deviation shows up at the
+    # start of the transcript anyway, which is what this header is for.
+    transcript = meta.transcript
+    truncated = len(transcript) > _TRANSCRIPT_HEADER_MAX_CHARS
+    if truncated:
+        transcript = transcript[:_TRANSCRIPT_HEADER_MAX_CHARS]
+        headers["X-TTS-Transcript-Truncated"] = "true"
+    headers["X-TTS-Transcript-B64"] = base64.b64encode(
+        transcript.encode("utf-8")
+    ).decode("ascii")
+    return headers
+
+
+@app.post("/text-to-speech")
+async def text_to_speech(
+    body: TextToSpeechRequest,
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_internal_id: Optional[str] = Header(default=None, alias="x-internal-id"),
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+):
+    """Synthesise speech from text and return the audio bytes.
+
+    Open to any trusted internal caller — app.dentnode.com (x-internal-key) or
+    d10.live (x-d10-internal-key) — like /audio-to-text.
+
+    Nothing is stored here. The audio is streamed straight back to the caller,
+    which owns the decision of whether it lands in Spaces, goes out over
+    WhatsApp, or is played once and dropped.
+    """
+    _require_shared_internal_key(x_internal_key or x_internal_id, x_d10_internal_key)
+
+    voice = body.voice or settings.text_to_speech_voice
+    try:
+        text = validate_speech_request(
+            text=body.text, voice=voice, audio_format=body.audio_format
+        )
+    except ValueError as exc:
+        # Covers UnsupportedVoice/UnsupportedFormat too — both subclass ValueError.
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    lab_id = body.lab_id or PLATFORM_LAB_ID
+
+    def meter(meta: SpeechMeta) -> None:
+        _fire_and_forget(
+            report_usage(
+                feature="text_to_speech",
+                lab_id=lab_id,
+                user_id=body.user_id,
+                model=meta.model,
+                usage=meta.usage,
+                cost=meta.cost_usd,
+                cost_source=meta.cost_source,
+                latency_ms=meta.latency_ms,
+                status=meta.status,
+                meta=meta.as_usage_meta(),
+            )
+        )
+
+    # open() blocks until the first audio frame arrives, so an upstream failure
+    # becomes a clean 502 here rather than a truncated file the caller has
+    # already started saving.
+    try:
+        speech = await SpeechStream(
+            text=text, voice=voice, audio_format=body.audio_format
+        ).open()
+    except OpenRouterError as exc:
+        logger.error(
+            "Text-to-speech generation failed",
+            extra={"lab_id": lab_id, "error": str(exc)},
+        )
+        _fire_and_forget(
+            report_usage(
+                feature="text_to_speech",
+                lab_id=lab_id,
+                user_id=body.user_id,
+                model=settings.text_to_speech_model,
+                status="error",
+                meta={"voice": voice, "chars": len(text)},
+            )
+        )
+        raise HTTPException(status_code=502, detail="Text-to-speech model call failed")
+
+    if not body.stream:
+        audio = await speech.collect()
+        meter(speech.meta)
+        if speech.meta.status != "ok":
+            # Nothing has been sent yet on this path, so a mid-stream failure
+            # can still surface as an error instead of a silently truncated
+            # file. Returning the partial audio as a 200 would defeat the only
+            # reason a caller asks for the buffered mode.
+            logger.error(
+                "Text-to-speech stream ended early",
+                extra={"lab_id": lab_id, "audio_bytes": speech.meta.audio_bytes},
+            )
+            raise HTTPException(
+                status_code=502, detail="Text-to-speech stream ended early"
+            )
+        return Response(
+            content=audio,
+            media_type=media_type_for(speech.meta.audio_format),
+            headers=_speech_headers(speech.meta, streaming=False),
+        )
+
+    async def audio_stream():
+        try:
+            async for chunk in speech.chunks():
+                yield chunk
+        finally:
+            # Runs on a client disconnect as well as on a clean finish, so the
+            # spend OpenRouter has already charged for is never lost.
+            meter(speech.meta)
+
+    return StreamingResponse(
+        audio_stream(),
+        media_type=media_type_for(speech.meta.audio_format),
+        headers=_speech_headers(speech.meta, streaming=True),
+    )
+
+
+@app.get("/text-to-speech/voices")
+async def text_to_speech_voices(
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_internal_id: Optional[str] = Header(default=None, alias="x-internal-id"),
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, Any]:
+    """What a caller may put in `voice` / `audio_format`, and the current default."""
+    _require_shared_internal_key(x_internal_key or x_internal_id, x_d10_internal_key)
+    return {
+        "voices": list(SUPPORTED_VOICES),
+        "formats": list(SUPPORTED_FORMATS),
+        "default_voice": settings.text_to_speech_voice,
+        "model": settings.text_to_speech_model,
+        "max_chars": settings.text_to_speech_max_chars,
     }
 
 

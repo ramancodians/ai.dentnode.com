@@ -7,6 +7,19 @@ uvicorn[standard]>=0.30.0
 httpx>=0.27.0
 pydantic>=2.7.0
 python-dotenv>=1.0.0
+# Required by FastAPI for the internal multipart call-recording upload.
+python-multipart>=0.0.20,<1.0.0
+
+# Production tracing. The SDK/exporter release and contrib instrumentation
+# release are the matching OpenTelemetry set. Instrumentation is configured
+# explicitly in telemetry.py; broad auto-instrumentation is deliberately not
+# used because this service handles patient data.
+# google-adk 2.2 currently caps the SDK/API at 1.41.1. The corresponding
+# contrib release is 0.62b1; keep this set aligned when ADK's cap moves.
+opentelemetry-api==1.41.1
+opentelemetry-sdk==1.41.1
+opentelemetry-exporter-otlp-proto-http==1.41.1
+opentelemetry-instrumentation-httpx==0.62b1
 
 # Scan Review (standalone mesh QA module). trimesh's loaders + topology need
 # only numpy; the heavy rtree/embree extras are deliberately NOT installed, so
@@ -37,3 +50,11 @@ networkx>=3.0
 # imports tzdata": nothing does, and that is exactly the point.
 tzdata>=2025.1
 
+
+# Real-time voice agent (voice_call/worker.py, run as its own process) and the
+# LiveKit room tokens Voice Lab mints. Pinned exactly: the Agents API moved
+# between minor releases (turn_handling replaced the old endpointing kwargs in
+# 1.8). The [openai] extra is the OpenAI-compatible client pointed at OpenRouter,
+# not an OpenAI key. STT/TTS/turn detection are LiveKit Inference (no local models
+# beyond the bundled Silero VAD).
+livekit-agents[openai]==1.8.3

@@ -91,6 +91,13 @@ class Settings:
     # back to INTERNAL_API_KEY during the migration, but production should set
     # D10_INTERNAL_KEY explicitly.
     d10_internal_key: str = _get("D10_INTERNAL_KEY", "") or internal_key
+    calling_voice_internal_key: str = _get("CALLING_VOICE_INTERNAL_KEY", "")
+    # LiveKit Cloud project for the real-time voice agent (voice_call/worker.py,
+    # a separate process) and for Voice Lab's LiveKit mode, which mints room
+    # tokens. Optional: unset disables both without affecting anything else.
+    livekit_url: str = _get("LIVEKIT_URL", "")
+    livekit_api_key: str = _get("LIVEKIT_API_KEY", "")
+    livekit_api_secret: str = _get("LIVEKIT_API_SECRET", "")
     d10_internal_base_url: str = _get(
         "D10_INTERNAL_BASE_URL", "http://localhost:3000/api"
     ).rstrip("/")
@@ -114,14 +121,21 @@ class Settings:
 
     # Audio-to-Text agent: transcribe a Digital Ocean audio URL and summarise
     # it. A single-call feature agent (no ADK tool loop) shared by both
-    # app.dentnode.com and d10.live. The audio model must accept multimodal
-    # `input_audio` content parts — the OpenRouter catalog currently exposes
-    # `openai/gpt-audio` / `openai/gpt-audio-mini` for this.
+    # app.dentnode.com and d10.live. This goes through OpenRouter's
+    # /audio/transcriptions endpoint, so the model must be a transcription model
+    # returning `verbose_json` segments; `microsoft/mai-transcribe-2` adds Azure
+    # diarization on top, which is what yields per-segment speaker ids. The
+    # optional summary is written by `model` (LABY_MODEL), not by this one.
     audio_to_text_model: str = _openrouter_model(
-        _get("AUDIO_TO_TEXT_MODEL", "openai/gpt-audio-mini")
+        _get("AUDIO_TO_TEXT_MODEL", "microsoft/mai-transcribe-2")
     )
     audio_to_text_timeout_secs: int = _int("AUDIO_TO_TEXT_TIMEOUT_SECS", 120)
     audio_to_text_max_bytes: int = _int("AUDIO_TO_TEXT_MAX_BYTES", 25 * 1024 * 1024)
+    # Total multipart request cap. It is intentionally larger than the audio
+    # payload cap to leave room for boundaries and the two short form fields.
+    call_audio_request_max_bytes: int = _int(
+        "CALL_AUDIO_REQUEST_MAX_BYTES", audio_to_text_max_bytes + 1024 * 1024
+    )
     audio_to_text_fetch_timeout_secs: int = _int(
         "AUDIO_TO_TEXT_FETCH_TIMEOUT_SECS", 30
     )
@@ -140,6 +154,23 @@ class Settings:
     audio_to_text_allow_insecure_fetch: bool = (
         _get("AUDIO_TO_TEXT_ALLOW_INSECURE_FETCH", "0").lower() in ("1", "true", "yes")
     )
+
+    # Text-to-Speech agent: synthesise spoken audio from text and stream it
+    # back. A single-call feature agent (no ADK tool loop) open to every trusted
+    # internal caller. The model must emit the `audio` output modality — of the
+    # whole OpenRouter catalog only openai/gpt-audio, openai/gpt-audio-mini and
+    # the two Lyria music models do, and there is no free option among them.
+    # The mini variant is the default because it is 26.7x cheaper per audio
+    # output token ($0.0000024 vs $0.000064), which works out at roughly
+    # $0.0043 per minute of speech. Changing this knob is a spend decision.
+    text_to_speech_model: str = _openrouter_model(
+        _get("TEXT_TO_SPEECH_MODEL", "openai/gpt-audio-mini")
+    )
+    text_to_speech_voice: str = _get("TEXT_TO_SPEECH_VOICE", "alloy")
+    text_to_speech_timeout_secs: int = _int("TEXT_TO_SPEECH_TIMEOUT_SECS", 120)
+    # Cost control, not a technical limit: audio output is billed per second of
+    # speech, so the character cap is what bounds the spend of a single call.
+    text_to_speech_max_chars: int = _int("TEXT_TO_SPEECH_MAX_CHARS", 4000)
 
     # Short-term memory: how many recent thread turns to seed the session with.
     # Clamped to a safe range at read time; validate() checks the raw intent.
@@ -205,9 +236,25 @@ class Settings:
                 "AUDIO_TO_TEXT_MAX_BYTES must be 1–100 MiB, got "
                 f"{self.audio_to_text_max_bytes}"
             )
+        if self.call_audio_request_max_bytes <= self.audio_to_text_max_bytes:
+            raise RuntimeError(
+                "CALL_AUDIO_REQUEST_MAX_BYTES must exceed AUDIO_TO_TEXT_MAX_BYTES"
+            )
+        if self.call_audio_request_max_bytes > 101 * 1024 * 1024:
+            raise RuntimeError("CALL_AUDIO_REQUEST_MAX_BYTES must not exceed 101 MiB")
         if self.audio_to_text_fetch_timeout_secs < 1:
             raise RuntimeError(
                 "AUDIO_TO_TEXT_FETCH_TIMEOUT_SECS must be at least 1"
+            )
+        if self.text_to_speech_timeout_secs < 10:
+            raise RuntimeError(
+                "TEXT_TO_SPEECH_TIMEOUT_SECS must be ≥ 10 seconds, got "
+                f"{self.text_to_speech_timeout_secs}"
+            )
+        if not (1 <= self.text_to_speech_max_chars <= 100_000):
+            raise RuntimeError(
+                "TEXT_TO_SPEECH_MAX_CHARS must be 1–100000, got "
+                f"{self.text_to_speech_max_chars}"
             )
         if not self.openrouter_api_base.startswith(("http://", "https://")):
             raise RuntimeError(

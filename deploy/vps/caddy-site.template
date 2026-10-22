@@ -1,0 +1,26 @@
+ai.dentnode.com {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	@callAudio path /internal/call-audio/analyze
+	request_body @callAudio {
+		max_size 27MB
+	}
+
+	reverse_proxy __UPSTREAM__ {
+		# Agent responses use NDJSON/SSE-style streaming. Do not buffer them.
+		flush_interval -1
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

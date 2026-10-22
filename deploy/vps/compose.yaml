@@ -1,0 +1,73 @@
+name: dentnode-ai
+
+services:
+  ai:
+    image: ${AI_IMAGE:?set AI_IMAGE to an immutable GHCR digest}
+    container_name: dentnode-ai
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    env_file:
+      - ./env/runtime.env
+      - ./env/secrets.env
+    environment:
+      PORT: "8080"
+      D10_USAGE_OUTBOX_PATH: /var/lib/dentnode-ai/d10-usage-outbox.sqlite3
+      # Private OTLP/HTTP only. 172.19.0.10 is reserved for the collector on
+      # the internal telemetry network; no OTLP port is published on the VPS.
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://172.19.0.10:4318/v1/traces
+      OTEL_SERVICE_NAME: ai.dentnode.com
+      OTEL_SERVICE_VERSION: ${AI_IMAGE}
+    expose:
+      - "8080"
+    networks:
+      dentnode-edge:
+        aliases:
+          - dentnode-ai
+      dentnode-telemetry: {}
+    volumes:
+      - type: bind
+        source: ${AI_OUTBOX_DIR:-/var/lib/dentnode/ai-outbox}
+        target: /var/lib/dentnode-ai
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - runtime
+        - --health
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    stop_grace_period: 360s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
+    mem_limit: ${AI_MEMORY_LIMIT:-1g}
+    cpus: ${AI_CPU_LIMIT:-1.0}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      com.dentnode.service: ai.dentnode.com
+      com.dentnode.role: api
+
+networks:
+  dentnode-edge:
+    external: true
+    name: dentnode-edge
+  dentnode-telemetry:
+    external: true
+    name: dentnode-telemetry

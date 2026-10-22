@@ -13,7 +13,10 @@ from typing import Any, Dict, List, Optional
 
 from google.adk.tools import ToolContext
 
+from .jev import JEV_MODEL, JevError
+from .jev_search import suggest_search_match, with_search_suggestion
 from .node_client import NodeToolError, call_tool
+from .usage import report_usage
 
 
 def _lab_id(tool_context: ToolContext) -> str:
@@ -52,7 +55,37 @@ def _range_params(
 
 async def _run(tool_context: ToolContext, name: str, params: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        return await call_tool(name, _lab_id(tool_context), params, user_id=_user_id(tool_context))
+        lab_id = _lab_id(tool_context)
+        user_id = _user_id(tool_context)
+        result = await call_tool(name, lab_id, params, user_id=user_id)
+        if name in {"find_case", "find_doctor", "staff_list"}:
+            try:
+                suggestion = await suggest_search_match(name, params.get("query"), result)
+            except JevError:
+                await report_usage(
+                    feature="jev_text_match", lab_id=lab_id, user_id=user_id,
+                    model=JEV_MODEL, cost=0.0, status="error",
+                    meta={"tool": name},
+                )
+            else:
+                if suggestion is not None:
+                    decision = suggestion.decision
+                    await report_usage(
+                        feature="jev_text_match", lab_id=lab_id, user_id=user_id,
+                        model=decision.model,
+                        usage={
+                            "prompt_tokens": decision.input_tokens,
+                            "completion_tokens": decision.output_tokens,
+                            "total_tokens": decision.input_tokens + decision.output_tokens,
+                        },
+                        cost=decision.cost_usd,
+                        cost_source="openrouter" if decision.cost_usd is not None else "estimated",
+                        latency_ms=decision.latency_ms,
+                        request_id=decision.request_id,
+                        meta={"tool": name},
+                    )
+                    result = with_search_suggestion(result, suggestion)
+        return result
     except NodeToolError as exc:
         # Returned to the model as a normal result so it can apologise/retry
         # rather than crashing the turn.
@@ -1234,8 +1267,65 @@ async def task_notify(
     return await _run(tool_context, "task_notify", params)
 
 
+async def call_client(tool_context: ToolContext, doctor_name: str, objective: str,
+                      doctor_clinic: Optional[str] = None) -> Dict[str, Any]:
+    """Prepare ONE AI voice call to a lab client. Does not dial or charge.
+
+    The returned card lets the user review and confirm in the browser. Never
+    claim a call has started from this tool. Cannot confirm by tool parameter.
+
+    Args:
+        doctor_name: Client name supplied by the user; no raw phone numbers.
+        objective: The user's purpose for this call. Ask if not provided.
+        doctor_clinic: Optional clinic name to disambiguate clients.
+    """
+    return await _run(tool_context, "call_client", {
+        "doctor_name": doctor_name, "objective": objective,
+        "doctor_clinic": doctor_clinic or "",
+    })
+
+
+async def wallet_balance(tool_context: ToolContext) -> Dict[str, Any]:
+    """Read the lab's app.dentnode.com DentNode Wallet balance and transactions.
+
+    Every amount includes its currency; never assume INR or convert currencies.
+    This wallet is independent of D10 and WhatsApp credits. Adding money
+    requires a lab administrator using the Calling page.
+    """
+    return await _run(tool_context, "wallet_balance", {})
+
+
+async def call_history(tool_context: ToolContext, limit: int = 20,
+                       direction: Optional[str] = None, status: Optional[str] = None,
+                       cursor: Optional[str] = None) -> Dict[str, Any]:
+    """Read authorized lab call history. Never places or controls calls.
+
+    Args:
+        limit: Maximum number of calls, from 1 to 100.
+        direction: Optional INBOUND or OUTBOUND filter.
+        status: Optional call lifecycle status.
+        cursor: Optional continuation cursor from a previous result.
+    """
+    return await _run(tool_context, "call_history", {
+        "limit": limit, "direction": direction, "status": status, "cursor": cursor,
+    })
+
+
+async def call_summary(tool_context: ToolContext, call_id: str) -> Dict[str, Any]:
+    """Read one lab call's stored summary and transcript.
+
+    Args:
+        call_id: Internal call reference returned by call_history. Never display it.
+    """
+    return await _run(tool_context, "call_summary", {"call_id": call_id})
+
+
 # Registered, in priority order, with the LlmAgent.
 LABY_TOOLS = [
+    call_client,
+    wallet_balance,
+    call_history,
+    call_summary,
     # Meta / navigation
     report_directory,
     dentnode_guide,
