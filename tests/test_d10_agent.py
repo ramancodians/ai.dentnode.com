@@ -258,3 +258,25 @@ def test_model_cannot_override_trusted_tool_context():
                 }
             }
         )
+
+
+def test_system_prompt_relays_data_errors_instead_of_calling_the_feature_broken():
+    """A tool error about the clinic's own data must reach the user as such.
+
+    Regression guard for a real incident: reminder calls failed because every
+    patient's phone was stored without a country code, and the gateway returned
+    a clear message saying so. The prompt's blanket "never expose raw errors"
+    made the model report it as "the automated reminder call feature is
+    currently unavailable", which sent the operator to check deploys and logs
+    instead of fixing one field. The prompt must still withhold internals.
+    """
+    from agent.d10.runner import SYSTEM_INSTRUCTION
+
+    prompt = SYSTEM_INSTRUCTION.lower()
+    # Still refuses to leak the things that are genuinely sensitive.
+    for secret in ("credentials", "internal ids", "prompts", "tool internals"):
+        assert secret in prompt
+    # But no longer suppresses actionable validation messages wholesale.
+    assert "raw errors" not in prompt
+    assert "relay that reason in plain language" in prompt
+    assert "never describe a working feature as unavailable" in prompt
