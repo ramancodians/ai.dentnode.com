@@ -278,6 +278,20 @@ suits pre-rendered clips, not live conversation.
   The data-side fix ships separately in `d10` (`fix/patient-phone-e164`), which
   normalises `Patient.phone` to E.164 on write and backfills existing rows.
 
+## [Unreleased] — Pull requests run the suite before merge
+
+**Added**
+
+- `.github/workflows/ci.yaml` runs the complete `pytest` suite on pull requests
+  targeting `main`, before changes reach production. Its pinned actions,
+  read-only permissions, disabled credential persistence and 20-minute timeout
+  are preserved when reconciling the original PR workflow with current `main`.
+- The separate `deploy-vps.yaml` workflow tests the exact `main` commit again
+  before publishing an immutable GHCR image and deploying through the restricted
+  VPS dispatcher. PR checks do not receive production secrets or deploy code.
+- No secrets needed — `tests/conftest.py` sets every environment variable the
+  app reads and the suite mocks OpenRouter rather than calling it.
+
 ## [Unreleased] — Audio-to-Text endpoint
 
 **Added**
