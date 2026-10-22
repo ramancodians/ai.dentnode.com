@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-22 — Laby lab calls and app wallet isolation
+
+- Register client-call previews, app-wallet balance, call history and recorded-call summaries with Laby; forward native confirmation cards through the agent stream.
+- Route authenticated app voice usage to the app's AI ledger, preserving D10's durable usage path for D10 calls. Reject mixed lab/clinic billing contexts before model execution.
+- Use lab wording for app voice replies. The app owns confirmation, call state and wallet prices; charging remains disabled until app prices are approved.
+- Deploy with the corresponding app and shared Calling Service changes; no AI schema migration.
+
 ## [Unreleased] - Hourly D10 clinic summary (2026-10-01)
 
 - Added internal-key protected aggregate-only summary generation; Jev ranks known facts and deterministic templates render exact counts within 200 characters.

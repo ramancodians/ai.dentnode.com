@@ -1267,8 +1267,65 @@ async def task_notify(
     return await _run(tool_context, "task_notify", params)
 
 
+async def call_client(tool_context: ToolContext, doctor_name: str, objective: str,
+                      doctor_clinic: Optional[str] = None) -> Dict[str, Any]:
+    """Prepare ONE AI voice call to a lab client. Does not dial or charge.
+
+    The returned card lets the user review and confirm in the browser. Never
+    claim a call has started from this tool. Cannot confirm by tool parameter.
+
+    Args:
+        doctor_name: Client name supplied by the user; no raw phone numbers.
+        objective: The user's purpose for this call. Ask if not provided.
+        doctor_clinic: Optional clinic name to disambiguate clients.
+    """
+    return await _run(tool_context, "call_client", {
+        "doctor_name": doctor_name, "objective": objective,
+        "doctor_clinic": doctor_clinic or "",
+    })
+
+
+async def wallet_balance(tool_context: ToolContext) -> Dict[str, Any]:
+    """Read the lab's app.dentnode.com DentNode Wallet balance and transactions.
+
+    Every amount includes its currency; never assume INR or convert currencies.
+    This wallet is independent of D10 and WhatsApp credits. Adding money
+    requires a lab administrator using the Calling page.
+    """
+    return await _run(tool_context, "wallet_balance", {})
+
+
+async def call_history(tool_context: ToolContext, limit: int = 20,
+                       direction: Optional[str] = None, status: Optional[str] = None,
+                       cursor: Optional[str] = None) -> Dict[str, Any]:
+    """Read authorized lab call history. Never places or controls calls.
+
+    Args:
+        limit: Maximum number of calls, from 1 to 100.
+        direction: Optional INBOUND or OUTBOUND filter.
+        status: Optional call lifecycle status.
+        cursor: Optional continuation cursor from a previous result.
+    """
+    return await _run(tool_context, "call_history", {
+        "limit": limit, "direction": direction, "status": status, "cursor": cursor,
+    })
+
+
+async def call_summary(tool_context: ToolContext, call_id: str) -> Dict[str, Any]:
+    """Read one lab call's stored summary and transcript.
+
+    Args:
+        call_id: Internal call reference returned by call_history. Never display it.
+    """
+    return await _run(tool_context, "call_summary", {"call_id": call_id})
+
+
 # Registered, in priority order, with the LlmAgent.
 LABY_TOOLS = [
+    call_client,
+    wallet_balance,
+    call_history,
+    call_summary,
     # Meta / navigation
     report_directory,
     dentnode_guide,

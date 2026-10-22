@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from agent.audio_fetch import AudioFetchError, fetch_audio, sniff_audio_format
 from agent.audio_to_text import AudioSummaryError, UnsupportedAudioFormat, transcribe_audio
@@ -656,13 +656,23 @@ class CallingVoiceTurn(BaseModel):
 
 
 class CallingVoiceUsageContext(BaseModel):
-    clinic_id: str = Field(..., min_length=1, max_length=256)
+    platform: Literal["d10", "app"] = "d10"
+    clinic_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    lab_id: Optional[str] = Field(default=None, min_length=1, max_length=256)
     user_id: str = Field(..., min_length=1, max_length=256)
     actor_id: str = Field(..., min_length=1, max_length=256)
     conversation_id: str = Field(..., min_length=1, max_length=256)
     source_message_id: str = Field(..., min_length=1, max_length=512)
     correlation_id: str = Field(..., min_length=1, max_length=256)
     model_call_index: int = Field(..., ge=1, le=8)
+
+    @model_validator(mode="after")
+    def platform_scope(self):
+        if self.platform == "app" and (not self.lab_id or self.clinic_id):
+            raise ValueError("App calls require lab_id and cannot target D10 billing")
+        if self.platform == "d10" and (not self.clinic_id or self.lab_id):
+            raise ValueError("D10 calls require clinic_id and cannot target the app wallet")
+        return self
 
 
 class CallingVoiceRequest(BaseModel):
@@ -683,7 +693,8 @@ async def calling_voice_reply(
         raise HTTPException(status_code=401, detail="Invalid calling key")
     messages: List[Dict[str, str]] = [{
         "role": "system",
-        "content": calling_system_prompt(body.objective, body.recipient_name),
+        "content": calling_system_prompt(body.objective, body.recipient_name,
+                                          organization="dental lab" if body.usage_context.platform == "app" else "dental clinic"),
     }]
     for turn in body.history:
         messages.append({"role": "user", "content": turn.caller})
@@ -693,30 +704,41 @@ async def calling_voice_reply(
     usage_context = SimpleNamespace(**body.usage_context.model_dump(),
                                     causation_id=body.usage_context.source_message_id,
                                     reservation_id=None)
+    async def meter_reply(**values):
+        if body.usage_context.platform == "app":
+            # App owns the inclusive call charge and wallet. Never submit an
+            # app lab ID as a D10 clinic ID, even when an account exists there.
+            await report_usage(feature="app_ai_call_reply", lab_id=body.usage_context.lab_id,
+                user_id=body.usage_context.user_id, model=values["model"],
+                usage=values.get("usage"), cost=values.get("cost_usd"),
+                cost_source="openrouter" if values.get("cost_usd") is not None else "estimated",
+                status=values["status"], latency_ms=values.get("latency_ms"),
+                request_id=f"{body.usage_context.correlation_id}:turn:{body.usage_context.model_call_index}",
+                meta={"call_id": body.usage_context.correlation_id, "included_in_app_call": True})
+        else:
+            await d10_usage_outbox.enqueue(build_model_usage_event(
+                feature="ai_call_reply", context=usage_context,
+                model_call_index=body.usage_context.model_call_index, attempt=1, **values))
     try:
         result = await chat_completion(
             messages=messages, model=settings.d10_agent_model, temperature=0.2,
             max_tokens=180, timeout_secs=10,
         )
     except OpenRouterError as exc:
-        await d10_usage_outbox.enqueue(build_model_usage_event(
-            feature="ai_call_reply",
-            context=usage_context, model_call_index=body.usage_context.model_call_index,
-            attempt=1, provider="openrouter", model=settings.d10_agent_model,
+        await meter_reply(
+            provider="openrouter", model=settings.d10_agent_model,
             provider_request_id=None, usage=None, raw_usage=None,
             latency_ms=int((time.monotonic() - call_started) * 1000), status="error",
             error_code=type(exc).__name__,
-        ))
+        )
         logger.exception("Calling voice reply failed")
         raise HTTPException(status_code=502, detail="Voice agent unavailable")
-    await d10_usage_outbox.enqueue(build_model_usage_event(
-        feature="ai_call_reply",
-        context=usage_context, model_call_index=body.usage_context.model_call_index,
-        attempt=1, provider=result.provider, model=result.model,
+    await meter_reply(
+        provider=result.provider, model=result.model,
         provider_request_id=result.request_id, usage=result.usage,
         raw_usage=result.raw_usage, latency_ms=result.latency_ms,
         status="ok", cost_usd=result.cost_usd,
-    ))
+    )
     reply = result.text.strip()
     if not reply:
         raise HTTPException(status_code=502, detail="Voice agent returned no reply")
