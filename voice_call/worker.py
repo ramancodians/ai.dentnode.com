@@ -33,9 +33,10 @@ from agent.calling_prompt import calling_system_prompt
 from agent.config import settings
 from agent.voice_agent import _REASONING_MANDATORY
 
-from .config import AGENT_NAME, ELEVENLABS_MODEL, MAX_CALL_SECONDS, CallConfig, opening_instructions, stt_language
+from .config import AGENT_NAME, ELEVENLABS_MODEL, ELEVENLABS_READY, MAX_CALL_SECONDS, CallConfig, opening_instructions, stt_language
 from .metering import book_call
 from .callbacks import notify
+from .dispatch_guard import DispatchGuard
 from runtime import mark_voice_registered, validate_voice_config, voice_enabled
 
 os.environ["LIVEKIT_AGENT_NAME"] = AGENT_NAME
@@ -55,13 +56,24 @@ _METRIC_KEYS = (
 supervised = voice_enabled()
 if supervised:
     validate_voice_config()
+
+
+def _prewarm_voice_process(_process) -> None:
+    if ELEVENLABS_READY:
+        # This import otherwise blocks the audio loop on the first Hindi call.
+        from livekit.plugins import elevenlabs  # noqa: F401
+
+
 server = AgentServer(
     num_idle_processes=ServerEnvOption(dev_default=0, prod_default=int(os.environ.get("VOICE_WORKER_IDLE_PROCESSES", "1"))),
     host="127.0.0.1", port=8081,
+    setup_fnc=_prewarm_voice_process,
     **({"max_retry": 0, "drain_timeout": 310, "shutdown_process_timeout": 30, "session_end_timeout": 30} if supervised else {}),
 )
 if supervised:
     server.on("worker_registered", mark_voice_registered)
+
+dispatch_guard = DispatchGuard()
 
 
 def _reply_llm(model: str) -> lk_openai.LLM:
@@ -79,7 +91,7 @@ def _reply_llm(model: str) -> lk_openai.LLM:
     )
 
 
-@server.rtc_session()
+@server.rtc_session(on_request=dispatch_guard.on_request)
 async def entrypoint(ctx: JobContext) -> None:
     cfg = CallConfig.from_metadata(ctx.job.metadata)
     try:
