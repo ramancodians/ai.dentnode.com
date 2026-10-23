@@ -159,7 +159,7 @@ async function loadOptions() {
   lkOption.disabled = !options.livekit.enabled;
   if (!options.livekit.enabled) lkOption.textContent = 'LiveKit agent — not configured';
   $('engine').value = options.livekit.enabled && store.get('engine') === 'livekit' ? 'livekit' : 'ours';
-  fill($('lang'), options.languages, store.get('lang'));
+  fill($('lang'), options.languages, store.get('lang') ?? 'hi');
   fillModels();
   $('objective').value = store.get('objective') || options.default_objective;
   $('style').value = store.get('style') || '';

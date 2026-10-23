@@ -33,7 +33,7 @@ from agent.calling_prompt import calling_system_prompt
 from agent.config import settings
 from agent.voice_agent import _REASONING_MANDATORY
 
-from .config import AGENT_NAME, MAX_CALL_SECONDS, CallConfig, opening_instructions, stt_language
+from .config import AGENT_NAME, ELEVENLABS_MODEL, MAX_CALL_SECONDS, CallConfig, opening_instructions, stt_language
 from .metering import book_call
 from .callbacks import notify
 from runtime import mark_voice_registered, validate_voice_config, voice_enabled
@@ -96,12 +96,20 @@ async def run_call(ctx: JobContext, cfg: CallConfig) -> None:
     transcript: list[str] = []
     transcript_size = 0
 
-    tts_kwargs = {"voice": cfg.tts_voice} if cfg.tts_voice else {}
+    if cfg.tts_model == ELEVENLABS_MODEL:
+        from livekit.plugins import elevenlabs
+        tts = elevenlabs.TTS(
+            voice_id=cfg.tts_voice, model="eleven_flash_v2_5",
+            language=cfg.language if cfg.language in ("hi", "en", "mr") else "hi",
+        )
+    else:
+        tts_kwargs = {"voice": cfg.tts_voice} if cfg.tts_voice else {}
+        tts = inference.TTS(cfg.tts_model, **tts_kwargs)
     language = stt_language(cfg.stt_model, cfg.language)
     session = AgentSession(
         stt=inference.STT(cfg.stt_model, **({"language": language} if language else {})),
         llm=_reply_llm(cfg.reply_model),
-        tts=inference.TTS(cfg.tts_model, **tts_kwargs),
+        tts=tts,
     )
     if cfg.calling_service_callback:
         session.input.set_audio_enabled(False)
@@ -185,7 +193,7 @@ async def run_call(ctx: JobContext, cfg: CallConfig) -> None:
         return
 
     await session.start(
-        agent=Agent(instructions=calling_system_prompt(cfg.objective, cfg.recipient_name, multilingual=True)),
+        agent=Agent(instructions=calling_system_prompt(cfg.objective, cfg.recipient_name, language=cfg.language)),
         room=ctx.room,
         # Off regardless of the project setting: LiveKit Cloud observability
         # would upload the call's audio, transcript and logs — patient data —

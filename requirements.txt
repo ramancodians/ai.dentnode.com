@@ -61,4 +61,4 @@ tzdata>=2025.1
 # 1.8). The [openai] extra is the OpenAI-compatible client pointed at OpenRouter,
 # not an OpenAI key. STT/TTS/turn detection are LiveKit Inference (no local models
 # beyond the bundled Silero VAD).
-livekit-agents[openai]==1.8.3
+livekit-agents[openai,elevenlabs]==1.8.3

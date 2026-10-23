@@ -26,7 +26,7 @@ from agent.usage import report_usage
 from .config import CallConfig
 from .costs import (
     AGENT_SESSION_USD_PER_MIN, PRICE_TABLE_VERSION, SIP_USD_PER_MIN, STT_USD_PER_MIN,
-    TTS_USD_PER_MIN, llm_cost, openrouter_token_prices, per_minute,
+    ELEVENLABS_FLASH_USD_PER_1K_CHARS, TTS_USD_PER_MIN, llm_cost, openrouter_token_prices, per_minute,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,8 +74,10 @@ async def cost_lines(cfg: CallConfig, usage: Any, *, session_seconds: float,
                  llm_cost(prices, cfg.reply_model, llm_in, llm_out), llm_in, llm_out),
         CostLine("stt", "livekit", cfg.stt_model, int(stt_seconds * 1000), "millisecond",
                  per_minute(STT_USD_PER_MIN, cfg.stt_model, stt_seconds)),
-        CostLine("tts", "livekit", cfg.tts_model, tts_chars, "character",
-                 per_minute(TTS_USD_PER_MIN, cfg.tts_model, tts_seconds)),
+        CostLine("tts", "elevenlabs" if cfg.tts_model.startswith("elevenlabs/") else "livekit",
+                 cfg.tts_model, tts_chars, "character",
+                 ELEVENLABS_FLASH_USD_PER_1K_CHARS * tts_chars / 1000
+                 if cfg.tts_model.startswith("elevenlabs/") else per_minute(TTS_USD_PER_MIN, cfg.tts_model, tts_seconds)),
         CostLine("agent", "livekit", "agent-session", int(session_seconds * 1000), "millisecond",
                  AGENT_SESSION_USD_PER_MIN * session_seconds / 60.0),
     ]

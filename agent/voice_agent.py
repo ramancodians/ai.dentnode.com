@@ -221,7 +221,7 @@ async def run_voice_turn(req: VoiceTurnRequest) -> AsyncIterator[Dict[str, Any]]
 
     # 2. Reply.
     messages: List[Dict[str, str]] = [
-        {"role": "system", "content": calling_system_prompt(req.objective or DEFAULT_OBJECTIVE, multilingual=True)}
+        {"role": "system", "content": calling_system_prompt(req.objective or DEFAULT_OBJECTIVE, language=req.language)}
     ]
     for turn in req.history[-8:]:
         messages.append({"role": "user", "content": turn.get("caller", "")})

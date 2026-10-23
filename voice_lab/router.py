@@ -77,7 +77,11 @@ async def voice_lab_options(
             "enabled": bool(settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret),
             "stt_models": list(lk_config.STT_MODELS),
             "reply_models": list(REPLY_MODELS),
-            "tts_models": list(lk_config.TTS_MODELS),
+            "tts_models": [lk_config.DEFAULT_TTS_MODEL] + [
+                model for model in lk_config.TTS_MODELS
+                if model != lk_config.DEFAULT_TTS_MODEL
+                and (model != lk_config.ELEVENLABS_MODEL or lk_config.ELEVENLABS_READY)
+            ],
         },
     }
 
@@ -85,8 +89,8 @@ async def voice_lab_options(
 class LiveKitSessionRequest(BaseModel):
     stt_model: str = lk_config.STT_MODELS[0]
     reply_model: str = "anthropic/claude-haiku-4.5"
-    tts_model: str = lk_config.TTS_MODELS[0]
-    language: str = ""
+    tts_model: str = lk_config.DEFAULT_TTS_MODEL
+    language: str = "hi"
     objective: str = Field(default="", max_length=1000)
 
 
@@ -104,7 +108,8 @@ async def voice_lab_livekit_session(
     if not (settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret):
         raise HTTPException(status_code=503, detail="LiveKit is not configured")
     if (body.stt_model not in lk_config.STT_MODELS or body.reply_model not in REPLY_MODELS
-            or body.tts_model not in lk_config.TTS_MODELS or body.language not in lk_config.LANGUAGES):
+            or body.tts_model not in lk_config.TTS_MODELS or body.language not in lk_config.LANGUAGES
+            or (body.tts_model == lk_config.ELEVENLABS_MODEL and not lk_config.ELEVENLABS_READY)):
         raise HTTPException(status_code=400, detail="Unknown model or language")
 
     from livekit import api  # optional dependency path: only needed for this route
@@ -135,7 +140,7 @@ async def voice_lab_turn(
     text: str = Form(default="", max_length=1000),
     history: str = Form(default="[]", max_length=20000),
     objective: str = Form(default="", max_length=1000),
-    language: str = Form(default=""),
+    language: str = Form(default="hi"),
     stt_model: str = Form(default=STT_MODELS[0]),
     reply_model: str = Form(default=REPLY_MODELS[0]),
     tts_model: str = Form(default=TTS_MODELS[0]),

@@ -6,20 +6,15 @@ patient hears.
 """
 
 
-def calling_system_prompt(objective: str, recipient_name: str = "", *, multilingual: bool = False, organization: str = "dental clinic") -> str:
-    """``multilingual=False`` is the turn-based Plivo path: its ``<Speak>``
-    voice is English-only, so a reply in another language would be mangled.
-    The LiveKit agent's TTS reads any language, so it mirrors the caller."""
-    if multilingual:
-        # Replies go straight to a TTS model that reads verbatim, so they must
-        # already be speakable: no markdown, lists or symbols.
-        style = (
-            "Reply in one or two short, natural spoken sentences, in the same language the "
-            "recipient uses. Plain speech only: no markdown, lists, emojis or symbols; write "
-            "times and numbers the way you would say them. "
-        )
-    else:
-        style = "Speak in short, natural English sentences. "
+def calling_system_prompt(objective: str, recipient_name: str = "", *, organization: str = "dental clinic", language: str = "hi") -> str:
+    """Keep spoken replies in the configured language; Hindi is the default."""
+    spoken_language = {"hi": "Hindi in Devanagari script", "en": "English", "mr": "Marathi"}.get(language, "Hindi in Devanagari script")
+    style = (
+        f"Reply in one or two short, natural spoken sentences in {spoken_language}, even if the "
+        "recipient speaks another language. Preserve names and clinical terms accurately. "
+        "Plain speech only: no markdown, lists, emojis or symbols; write times and numbers "
+        "the way you would say them. "
+    )
     return (
         f"You are a {organization}'s AI phone assistant. Your task is to deliver the team's stated "
         "objective and converse briefly about it. " + style +

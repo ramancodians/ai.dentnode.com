@@ -33,10 +33,14 @@ STT_MODELS = (
 )
 TTS_MODELS = (
     "fishaudio/s2.1-pro",
+    "elevenlabs/eleven_flash_v2_5",
     "cartesia/sonic-3",
     "inworld/inworld-tts-2",
     "deepgram/aura-2",
 )
+ELEVENLABS_MODEL = "elevenlabs/eleven_flash_v2_5"
+ELEVENLABS_READY = bool(os.environ.get("ELEVEN_API_KEY") and os.environ.get("ELEVENLABS_HINDI_VOICE_ID"))
+DEFAULT_TTS_MODEL = ELEVENLABS_MODEL if ELEVENLABS_READY else TTS_MODELS[0]
 LANGUAGES = ("", "en", "hi", "mr")
 
 DEFAULT_OBJECTIVE = (
@@ -79,11 +83,11 @@ class CallConfig:
     recipient_name: str = ""
     clinic_name: str = ""
     greeting: str = ""
-    language: str = ""
+    language: str = "hi"
     stt_model: str = STT_MODELS[0]
     reply_model: str = "anthropic/claude-haiku-4.5"
-    tts_model: str = TTS_MODELS[0]
-    tts_voice: str = ""
+    tts_model: str = DEFAULT_TTS_MODEL
+    tts_voice: str = os.environ.get("ELEVENLABS_HINDI_VOICE_ID", "") if ELEVENLABS_READY else ""
     source: str = "voice_lab"
     # Set by a dispatcher acting for a clinic (Calling Service): books the
     # call's spend to that clinic's D10 ledger. Absent = platform spend.
@@ -113,8 +117,14 @@ class CallConfig:
             cfg.stt_model = data["stt_model"]
         if data.get("reply_model") in REPLY_MODELS:
             cfg.reply_model = data["reply_model"]
-        if data.get("tts_model") in TTS_MODELS:
+        if data.get("tts_model") in TTS_MODELS and (data["tts_model"] != ELEVENLABS_MODEL or ELEVENLABS_READY):
             cfg.tts_model = data["tts_model"]
+        if data.get("tts_model") == ELEVENLABS_MODEL and not ELEVENLABS_READY:
+            cfg.tts_voice = ""
+        if cfg.tts_model == ELEVENLABS_MODEL and not cfg.tts_voice:
+            cfg.tts_voice = os.environ.get("ELEVENLABS_HINDI_VOICE_ID", "")
+        if cfg.tts_model != ELEVENLABS_MODEL and not data.get("tts_voice"):
+            cfg.tts_voice = ""
         usage = data.get("usage_context")
         if isinstance(usage, dict) and all(
             isinstance(usage.get(k), str) and usage[k].strip() for k in USAGE_CONTEXT_KEYS

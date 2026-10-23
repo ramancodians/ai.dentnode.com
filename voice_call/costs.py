@@ -21,7 +21,7 @@ from agent.config import settings
 
 logger = logging.getLogger(__name__)
 
-PRICE_TABLE_VERSION = "livekit-build-2026-10-01"
+PRICE_TABLE_VERSION = "livekit-build-2026-10-01-elevenlabs-api-2026-10-23"
 
 # USD per minute of audio.
 STT_USD_PER_MIN: Dict[str, float] = {
@@ -38,6 +38,7 @@ TTS_USD_PER_MIN: Dict[str, float] = {
     "inworld/inworld-tts-2": 0.0150,
     "deepgram/aura-2": 0.0180,
 }
+ELEVENLABS_FLASH_USD_PER_1K_CHARS = 0.05
 AGENT_SESSION_USD_PER_MIN = 0.0100
 # LiveKit's SIP leg only. The carrier leg (Plivo) is billed by Plivo and is
 # not included here.
