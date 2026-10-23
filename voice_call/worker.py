@@ -212,6 +212,7 @@ async def run_call(ctx: JobContext, cfg: CallConfig) -> None:
         # to LiveKit. Recordings belong to Calling Service's own storage.
         record=False,
     )
+    logger.info("voice session started")
     accepted = await notify(cfg.calling_service_callback, "started")
     if not accepted:
         ctx.shutdown(reason="call_claim_rejected")
@@ -228,7 +229,20 @@ async def run_call(ctx: JobContext, cfg: CallConfig) -> None:
                    "tts": cfg.tts_model, "language": cfg.language})
 
     if cfg.greeting:
-        session.say(cfg.greeting)
+        # The disclosure and first greeting must finish before caller speech
+        # can interrupt them. Early "hello" otherwise cancels synthesis and
+        # can leave the callee hearing silence.
+        greeting = session.say(cfg.greeting, allow_interruptions=False)
+        logger.info("voice greeting queued")
+
+        def _greeting_done(handle) -> None:
+            error = handle.exception()
+            logger.info("voice greeting finished", extra={
+                "interrupted": handle.interrupted,
+                "error_type": type(error).__name__ if error else None,
+            })
+
+        greeting.add_done_callback(_greeting_done)
     else:
         session.generate_reply(instructions=opening_instructions(cfg))
 
