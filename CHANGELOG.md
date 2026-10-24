@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased] - Custom accounting report specs (2026-10-25)
+
+- New internal-key `POST /custom-report-spec` (agent/custom_report.py): turns a lab user's request into a report spec chosen from the catalog Node sends (datasets, field keys, presets, filter ops, aggregates, chart kinds). Returns `{title, summary, spec}`; never sees lab data, never writes SQL. Node validates and runs the spec and may call once more with `previous_spec` + `errors`.
+- Uses `settings.model` (text), temperature 0.1; metered as feature `custom_report` (status error on model/parse failure). Verified locally with five prompts, 6–11 s and under $0.0005 each.
+- Deploy before the app.dentnode.com change that calls it; no schema change here.
+
 ## 2026-10-22 — Laby lab calls and app wallet isolation
 
 - Register client-call previews, app-wallet balance, call history and recorded-call summaries with Laby; forward native confirmation cards through the agent stream.
