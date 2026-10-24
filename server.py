@@ -28,6 +28,10 @@ from agent.audio_to_text import AudioSummaryError, UnsupportedAudioFormat, trans
 from agent.calling_prompt import calling_system_prompt
 from agent.case_from_image import CaseExtractionError, extract_case_from_image
 from agent.config import settings
+from agent.custom_report import (
+    CustomReportParseError,
+    generate_custom_report_spec,
+)
 from agent.insights import generate_insights
 from agent.image_to_entry import ImageToEntryResult, image_to_entry
 from agent.logging_setup import setup_logging
@@ -275,6 +279,18 @@ class RejectedCasesRequest(BaseModel):
     lab_name: str = Field(default="")
     cases: List[Dict[str, Any]] = Field(default_factory=list)
     images: List[RejectedCaseImage] = Field(default_factory=list)
+
+
+class CustomReportSpecRequest(BaseModel):
+    lab_id: str = Field(..., min_length=1)
+    user_id: Optional[str] = None
+    prompt: str = Field(..., min_length=1, max_length=1000)
+    today: str = Field(..., min_length=10, max_length=10)
+    catalog: Dict[str, Any] = Field(default_factory=dict)
+    current_spec: Optional[Dict[str, Any]] = None
+    # Set on Node's one retry, when its validator rejected the first spec.
+    previous_spec: Optional[Any] = None
+    errors: List[str] = Field(default_factory=list)
 
 
 class ProductUpdateRequest(BaseModel):
@@ -1474,6 +1490,69 @@ async def rejected_cases_report(
     )
 
     return {"success": True, "report": result.report, "model": result.model}
+
+
+@app.post("/custom-report-spec")
+async def custom_report_spec(
+    body: CustomReportSpecRequest,
+    x_internal_key: Optional[str] = Header(default=None, alias="x-internal-key"),
+    x_internal_id: Optional[str] = Header(default=None, alias="x-internal-id"),
+) -> Dict[str, Any]:
+    """Prompt → custom accounting report spec. Node validates and runs it."""
+    provided_key = x_internal_key or x_internal_id
+    _require_internal_key(provided_key)
+
+    def _meter_error() -> None:
+        _fire_and_forget(
+            report_usage(
+                feature="custom_report",
+                lab_id=body.lab_id,
+                user_id=body.user_id,
+                model=settings.model,
+                status="error",
+            )
+        )
+
+    try:
+        result = await generate_custom_report_spec(
+            prompt=body.prompt,
+            catalog=body.catalog,
+            today=body.today,
+            current_spec=body.current_spec,
+            previous_spec=body.previous_spec,
+            errors=body.errors[:20],
+        )
+    except CustomReportParseError as exc:
+        logger.error(
+            "Custom report spec was not parseable",
+            extra={"lab_id": body.lab_id, "error": str(exc)},
+        )
+        _meter_error()
+        raise HTTPException(status_code=502, detail="The AI reply was not a usable report")
+    except OpenRouterError as exc:
+        logger.error(
+            "Custom report model call failed",
+            extra={"lab_id": body.lab_id, "error": str(exc)},
+        )
+        _meter_error()
+        raise HTTPException(status_code=502, detail="Custom report model call failed")
+
+    _fire_and_forget(
+        report_usage(
+            feature="custom_report",
+            lab_id=body.lab_id,
+            user_id=body.user_id,
+            model=result.model,
+            usage=result.usage,
+            cost=result.cost_usd,
+            cost_source="openrouter" if result.cost_usd is not None else "estimated",
+            latency_ms=result.latency_ms,
+            status="ok",
+            meta={"retry": bool(body.errors)},
+        )
+    )
+
+    return {"success": True, "result": result.result, "model": result.model}
 
 
 @app.post("/product-update-email")
