@@ -721,6 +721,14 @@ async def calling_voice_reply(
                                     causation_id=body.usage_context.source_message_id,
                                     reservation_id=None)
     async def meter_reply(**values):
+        values["raw_usage"] = {**(values.get("raw_usage") or {}),
+            "cost_source": "provider_reported" if values.get("cost_usd") is not None else "unknown",
+            "unknown_reason": None if values.get("cost_usd") is not None else "No provider amount was returned for this reply attempt.",
+            "call_id": body.usage_context.correlation_id, "pipeline": "plivo_ivr",
+            "component": "llm", "turn": body.usage_context.model_call_index,
+            "status": values["status"], "provider_request_id": values.get("provider_request_id"),
+            "recorded_at_unix_ms": int(time.time() * 1000),
+            "stt_provider": "plivo", "tts_provider": "plivo", "expense_owner": "DENTNODE"}
         if body.usage_context.platform == "app":
             # App owns the inclusive call charge and wallet. Never submit an
             # app lab ID as a D10 clinic ID, even when an account exists there.

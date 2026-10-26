@@ -35,6 +35,7 @@ from agent.voice_agent import _REASONING_MANDATORY
 
 from .config import AGENT_NAME, ELEVENLABS_MODEL, ELEVENLABS_READY, MAX_CALL_SECONDS, CallConfig, opening_instructions, stt_language
 from .metering import book_call
+from .accounting import VoiceAccounting
 from .callbacks import notify
 from .dispatch_guard import DispatchGuard
 from runtime import mark_voice_registered, validate_voice_config, voice_enabled
@@ -94,15 +95,23 @@ def _reply_llm(model: str) -> lk_openai.LLM:
 @server.rtc_session(on_request=dispatch_guard.on_request)
 async def entrypoint(ctx: JobContext) -> None:
     cfg = CallConfig.from_metadata(ctx.job.metadata)
+    accounting = VoiceAccounting(cfg, room=ctx.room.name, job_id=ctx.job.id,
+                                 dispatch_id=getattr(ctx.job, "dispatch_id", ""))
     try:
-        await run_call(ctx, cfg)
-    except Exception:
+        await accounting.checkpoint("worker_assigned")
+        await run_call(ctx, cfg, accounting)
+    except Exception as error:
+        try:
+            await accounting.checkpoint("worker_failed", error_type=type(error).__name__,
+                monetary_completeness="UNKNOWN", reason="Worker setup failed; absence of usage is not proof of zero expense.")
+        except Exception:
+            logger.exception("recording worker failure accounting failed")
         await notify(cfg.calling_service_callback, "failed")
         ctx.shutdown(reason="voice_start_failed")
         raise
 
 
-async def run_call(ctx: JobContext, cfg: CallConfig) -> None:
+async def run_call(ctx: JobContext, cfg: CallConfig, accounting: VoiceAccounting) -> None:
     await ctx.connect()
     accepted = False
     transcript: list[str] = []
@@ -118,9 +127,12 @@ async def run_call(ctx: JobContext, cfg: CallConfig) -> None:
         tts_kwargs = {"voice": cfg.tts_voice} if cfg.tts_voice else {}
         tts = inference.TTS(cfg.tts_model, **tts_kwargs)
     language = stt_language(cfg.stt_model, cfg.language)
+    stt = inference.STT(cfg.stt_model, **({"language": language} if language else {}))
+    llm = _reply_llm(cfg.reply_model)
+    for provider in (stt, llm, tts):
+        provider.on("metrics_collected", accounting.capture)
     session = AgentSession(
-        stt=inference.STT(cfg.stt_model, **({"language": language} if language else {})),
-        llm=_reply_llm(cfg.reply_model),
+        stt=stt, llm=llm,
         tts=tts,
     )
     if cfg.calling_service_callback:
@@ -160,6 +172,12 @@ async def run_call(ctx: JobContext, cfg: CallConfig) -> None:
     session_started = time.monotonic()
     sip_joined: dict = {}
     sip_seconds = 0.0
+    sip_legs: dict = {}
+
+    def observe_leg(p):
+        attributes = p.attributes or {}
+        sip_legs[p.sid] = {"participant_sid": p.sid, "sip_call_id": attributes.get("sip.callID"),
+                          "provider_sip_call_id": attributes.get("sip.callIDFull"), "trunk_id": attributes.get("sip.trunkID")}
 
     def _is_sip(p: rtc.RemoteParticipant) -> bool:
         return p.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
@@ -167,11 +185,13 @@ async def run_call(ctx: JobContext, cfg: CallConfig) -> None:
     for p in ctx.room.remote_participants.values():
         if _is_sip(p):
             sip_joined[p.identity] = session_started
+            observe_leg(p)
 
     @ctx.room.on("participant_connected")
     def _on_joined(p: rtc.RemoteParticipant) -> None:
         if _is_sip(p):
             sip_joined[p.identity] = time.monotonic()
+            observe_leg(p)
 
     @ctx.room.on("participant_disconnected")
     def _on_left(p: rtc.RemoteParticipant) -> None:
@@ -182,21 +202,56 @@ async def run_call(ctx: JobContext, cfg: CallConfig) -> None:
             if cfg.calling_service_callback and not sip_joined:
                 ctx.shutdown(reason="caller_disconnected")
 
-    async def book() -> None:
-        if not accepted:
-            await notify(cfg.calling_service_callback, "failed")
-            return
+    async def persist_final_usage() -> None:
         now = time.monotonic()
         try:
+            # Flush the provider metrics before taking the immutable snapshot.
+            try:
+                await asyncio.wait_for(session.aclose(), timeout=5)
+            except Exception:
+                logger.warning("Voice session close incomplete; retaining observed accounting metrics")
+            await accounting.drain()
             await book_call(
                 cfg, session.usage, room=ctx.room.name,
                 session_seconds=now - session_started,
                 sip_seconds=sip_seconds + sum(now - t for t in sip_joined.values()),
+                metrics=accounting.metrics, charge_session=accepted,
+                accounting={**accounting.identity, "sip_legs": list(sip_legs.values()),
+                    "owner_claim_accepted": accepted, "metric_limit_exceeded": accounting.dropped_metrics,
+                    "failed_checkpoints": accounting.failed_checkpoints,
+                    "ended_at_unix_ms": int(time.time() * 1000)},
             )
+            await accounting.checkpoint("terminal", owner_claim_accepted=accepted,
+                component_snapshot_persisted=True, metric_count=len(accounting.metrics),
+                dropped_metrics=accounting.dropped_metrics, sip_legs=list(sip_legs.values()),
+                session_seconds=now - session_started,
+                reason="Known usage recorded; invoice, allowances and shared allocations may remain incomplete.")
         except Exception:  # noqa: BLE001 - metering must not fail the job teardown
             logger.exception("booking call usage failed")
+            try:
+                await accounting.checkpoint("terminal_incomplete", component_snapshot_persisted=False,
+                    reason="Final accounting failed; durable request checkpoints remain available.")
+            except Exception:
+                logger.error("Terminal voice accounting checkpoint failed")
+
+    async def book() -> None:
+        # Pinned SDK shutdown/session-end budget is 30 seconds. Keep accounting
+        # at 20s plus <=1s incomplete marker and <=7s lifecycle callback. Durable
+        # outbox delivery continues in the independent API process after exit.
+        try:
+            await asyncio.wait_for(persist_final_usage(), timeout=20)
+        except asyncio.TimeoutError:
+            logger.warning("Voice accounting shutdown budget reached; retained checkpoints remain incomplete")
+            try:
+                await asyncio.wait_for(accounting.checkpoint("terminal_incomplete", component_snapshot_persisted=False,
+                    reason="Shutdown accounting budget reached; inspect persisted request evidence."), timeout=1)
+            except asyncio.TimeoutError:
+                pass
         finally:
-            await notify(cfg.calling_service_callback, "completed", "\n".join(transcript))
+            try:
+                await asyncio.wait_for(notify(cfg.calling_service_callback, "completed" if accepted else "failed", "\n".join(transcript)), timeout=7)
+            except asyncio.TimeoutError:
+                logger.warning("Voice lifecycle callback deadline reached; call owner reconciliation remains responsible")
 
     ctx.add_shutdown_callback(book)
 
@@ -214,6 +269,8 @@ async def run_call(ctx: JobContext, cfg: CallConfig) -> None:
     )
     logger.info("voice session started")
     accepted = await notify(cfg.calling_service_callback, "started")
+    await accounting.checkpoint("owner_claim", accepted=accepted,
+        models={"llm": cfg.reply_model, "stt": cfg.stt_model, "tts": cfg.tts_model})
     if not accepted:
         ctx.shutdown(reason="call_claim_rejected")
         return

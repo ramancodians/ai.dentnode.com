@@ -105,6 +105,11 @@ class CallConfig:
             data = {}
         cfg = cls()
         cfg.calling_service_callback = CallCallback.parse(data.get("calling_service_callback"))
+        accounting = data.get("accounting_context")
+        if isinstance(accounting, dict):
+            cfg.extra["accounting"] = {key: value[:512] for key, value in accounting.items()
+                if key in ("call_id", "direction", "provider_call_id", "provider_sip_call_id", "recording_policy")
+                and isinstance(value, str)}
         for key in ("objective", "recipient_name", "clinic_name", "greeting", "tts_voice", "source"):
             value = data.get(key)
             if isinstance(value, str) and value.strip():

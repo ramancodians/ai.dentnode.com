@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] - Prospective voice supplier accounting (2026-10-25)
+
+- Preserve per-plugin generation/request IDs, tokens/cache/reasoning, speech units, model/voice/language and lifecycle evidence in the existing durable usage outbox. Add audit-only checkpoints and terminal completeness, without customer ratings or wallet charges for checkpoints; accounting storage failure never aborts a call.
+- Prefer bounded read-only OpenRouter generation receipts, deduplicated by immutable generation ID, while retaining original metrics and explicit incomplete coverage. Keep missing amounts unknown; separate supplier expense, list estimates and shared/unallocated costs.
+- Version current public multilingual STT and character TTS estimates. Own-VPS worker compute is unallocated rather than a LiveKit Cloud deployment charge; the existing clinic ₹5 per started minute rule and historical charges remain unchanged.
+- Deploy D10's additive ai.voice_accounting consumer before this producer. No database migration, live call, supplier configuration change or deployment performed for this implementation.
+
 ## [Unreleased] - Custom accounting report specs (2026-10-25)
 
 - New internal-key `POST /custom-report-spec` (agent/custom_report.py): turns a lab user's request into a report spec chosen from the catalog Node sends (datasets, field keys, presets, filter ops, aggregates, chart kinds). Returns `{title, summary, spec}`; never sees lab data, never writes SQL. Node validates and runs the spec and may call once more with `previous_spec` + `errors`.
