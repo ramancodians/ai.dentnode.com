@@ -54,6 +54,8 @@ Node's `AiUsageEvent` ledger via `POST /api/internal/ai-usage`.
 | `POST /rejected-cases-report` | Rejected-cases ops report (Node cron) | `LABY_VISION_MODEL` |
 | `POST /product-update-email` | Weekly product-update marketing copy (Node cron) | `LABY_MODEL` |
 | `POST /audio-to-text` | **Audio-to-Text** — transcribe (with speaker diarization) + summarise a Digital Ocean audio URL (shared by app.dentnode.com + d10.live) | `AUDIO_TO_TEXT_MODEL` |
+| [`POST /d10/patient-summary`](docs/patient-summary-api.md) | Grounded two-word patient-directory label from bounded D10-authorized saved facts; exact evidence or null | `LABY_MODEL` |
+| [`POST /d10/call-audio/analyze`](docs/d10-call-audio-api.md) | D10-authorized MP3 recording upload, transcript/summary cache contract and clinic usage receipts | `AUDIO_TO_TEXT_MODEL` + `LABY_MODEL` |
 | `POST /internal/call-audio/analyze` | **Call analysis** — transcribe + summarise an app-owned multipart recording upload | `AUDIO_TO_TEXT_MODEL` |
 | `POST /text-to-speech` | **Text-to-Speech** — synthesise speech and stream the audio bytes back (open to every trusted internal caller) | `TEXT_TO_SPEECH_MODEL` |
 | `GET /text-to-speech/voices` | Voices, formats and limits the TTS endpoint accepts | — |

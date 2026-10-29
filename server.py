@@ -13,6 +13,7 @@ import base64
 import hmac
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -21,7 +22,7 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from agent.audio_fetch import AudioFetchError, fetch_audio, sniff_audio_format
 from agent.audio_to_text import AudioSummaryError, UnsupportedAudioFormat, transcribe_audio
@@ -59,6 +60,11 @@ from agent.reception.router import router as reception_tools_router
 from agent.d10.usage_outbox import build_model_usage_event, build_unit_usage_event
 from agent.d10.pricing import price_call_component
 from agent.d10.clinic_summary import ClinicSummaryRequest, generate_clinic_summary
+from agent.d10.patient_summary import (
+    PatientSummaryAlreadyClaimed,
+    PatientSummaryRequest,
+    generate_patient_summary,
+)
 
 # Standalone module — not part of Laby. Owns the /scan-review/* sub-namespace
 # (mesh QA from raw STL URLs); the flat POST /scan-review below is Laby's
@@ -93,18 +99,23 @@ class CallAudioIngressMiddleware:
     """
 
     _PATH = "/internal/call-audio/analyze"
+    _D10_PATH = "/d10/call-audio/analyze"
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or scope.get("path") != self._PATH:
+        if scope.get("type") != "http" or scope.get("path") not in {self._PATH, self._D10_PATH}:
             await self.app(scope, receive, send)
             return
 
         headers = dict(scope.get("headers") or [])
-        provided = headers.get(b"x-internal-key") or headers.get(b"x-internal-id")
-        expected = settings.internal_key.encode("utf-8")
+        if scope.get("path") == self._D10_PATH:
+            provided = headers.get(b"x-d10-internal-key")
+            expected = settings.d10_internal_key.encode("utf-8")
+        else:
+            provided = headers.get(b"x-internal-key") or headers.get(b"x-internal-id")
+            expected = settings.internal_key.encode("utf-8")
         if not expected or not provided or not hmac.compare_digest(provided, expected):
             response = JSONResponse(
                 status_code=401,
@@ -376,12 +387,15 @@ async def _record_d10_transcription(
         cost_usd=result.cost_usd,
         cost_source="provider" if result.cost_usd is not None else "unknown",
         latency_ms=result.latency_ms,
+        provider_request_id=getattr(result, "provider_request_id", None),
+        raw_usage=getattr(result, "raw_usage", None),
     ))
     if include_summary and result.summary_model:
         await d10_usage_outbox.enqueue(build_model_usage_event(
             feature="notes_summary", context=context, model_call_index=2, attempt=1,
-            provider="openrouter", model=result.summary_model, provider_request_id=None,
-            usage=result.summary_usage, raw_usage=None,
+            provider="openrouter", model=result.summary_model,
+            provider_request_id=getattr(result, "summary_provider_request_id", None),
+            usage=result.summary_usage, raw_usage=getattr(result, "summary_raw_usage", None),
             latency_ms=result.summary_latency_ms or 0, status="ok",
             cost_usd=result.summary_cost_usd,
         ))
@@ -636,6 +650,26 @@ async def d10_clinic_summary(
     return result.model_dump()
 
 
+@app.post("/d10/patient-summary")
+async def d10_patient_summary(
+    body: PatientSummaryRequest,
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, Any]:
+    """Label supplied saved facts only; D10 owns patient scope, dispatch and cache."""
+    _require_d10_internal_key(x_d10_internal_key)
+    try:
+        result = await generate_patient_summary(body, d10_usage_outbox)
+    except PatientSummaryAlreadyClaimed:
+        raise HTTPException(
+            status_code=409,
+            detail="Patient summary already claimed; read the existing D10 job",
+        ) from None
+    except Exception:
+        logger.warning("Patient summary generation unavailable")
+        raise HTTPException(status_code=502, detail="Patient summary unavailable") from None
+    return result.model_dump()
+
+
 @app.post("/d10/agent/run")
 async def d10_agent_run(
     body: D10RunRequest,
@@ -874,6 +908,93 @@ async def audio_to_text(
         "audio_bytes": result.audio_bytes,
         "segments": result.segments,
     }
+
+
+class D10CallAudioUsageContext(D10UsageContext):
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def opaque_fields(self):
+        if any(not re.fullmatch(r"[A-Za-z0-9_:-]{1,256}", value) for value in self.model_dump().values()):
+            raise ValueError("Invalid call analysis context")
+        return self
+
+
+@app.post("/d10/call-audio/analyze")
+async def analyze_d10_call_audio(
+    file: UploadFile = File(...),
+    call_id: str = Form(..., pattern=r"^[A-Za-z0-9_:-]{1,200}$"),
+    analysis_id: str = Form(..., pattern=r"^[A-Za-z0-9_:-]{1,200}$"),
+    recording_id: str = Form(..., pattern=r"^[A-Za-z0-9_:-]{1,200}$"),
+    recording_fingerprint: str = Form(..., pattern=r"^[a-f0-9]{64}$"),
+    usage_context: str = Form(..., min_length=2, max_length=4096),
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, Any]:
+    """Analyze one D10-authorized recording, without fetching a URL or app billing."""
+    _require_d10_internal_key(x_d10_internal_key)
+    try:
+        usage = D10CallAudioUsageContext.model_validate_json(usage_context)
+    except (ValidationError, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid call analysis context") from None
+    if (
+        usage.actor_id != usage.user_id
+        or usage.conversation_id != f"call:{call_id}"
+        or usage.source_message_id != analysis_id
+        or usage.correlation_id != call_id
+    ):
+        raise HTTPException(status_code=422, detail="Call analysis identity mismatch")
+    mime_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    if mime_type not in {"audio/mpeg", "audio/mp3"}:
+        raise HTTPException(status_code=415, detail="D10 call analysis requires MP3 audio")
+    audio = await file.read(min(settings.audio_to_text_max_bytes, 25 * 1024 * 1024) + 1)
+    await file.close()
+    if not audio:
+        raise HTTPException(status_code=400, detail="Audio file is empty")
+    if len(audio) > min(settings.audio_to_text_max_bytes, 25 * 1024 * 1024):
+        raise HTTPException(status_code=413, detail="Audio file is too large")
+    try:
+        audio_format = sniff_audio_format(audio, "", mime_type)
+    except AudioFetchError:
+        raise HTTPException(status_code=415, detail="Invalid audio content") from None
+    if audio_format != "mp3":
+        raise HTTPException(status_code=415, detail="Audio content does not match MP3 type")
+
+    # The D10 API supplies canonical, authorized artifact identity. A different
+    # analysis job must not repay for this same recording after a lost response.
+    claim = f"call-audio:{usage.clinic_id}:{call_id}:{recording_id}:{recording_fingerprint}"
+    if not await d10_usage_outbox.claim_model_execution(claim):
+        raise HTTPException(status_code=409, detail="Call recording analysis already claimed")
+    try:
+        result = await transcribe_audio(audio_bytes=audio, audio_format=audio_format, summary=True,
+                                        call_summary=True)
+    except AudioSummaryError as exc:
+        await _record_d10_transcription(usage, exc.transcription_result, include_summary=False)
+        context = SimpleNamespace(**usage.model_dump(), causation_id=analysis_id, reservation_id=None)
+        await d10_usage_outbox.enqueue(build_model_usage_event(
+            feature="notes_summary", context=context, model_call_index=2, attempt=1,
+            provider="openrouter", model=settings.model, provider_request_id=None,
+            usage=None, raw_usage=None, latency_ms=0, status="error", cost_usd=None,
+            error_code="CALL_SUMMARY_UNAVAILABLE",
+        ))
+        return {"transcript": exc.transcription_result.transcript, "summary": None,
+                "summary_error": "SUMMARY_UNAVAILABLE", "summary_source": None,
+                "summary_model_skipped": False}
+    except Exception:
+        # A transport/provider failure leaves the artifact claim occupied.
+        # Record an unknown-cost failed attempt; never retry or invent a receipt.
+        context = SimpleNamespace(**usage.model_dump(), causation_id=analysis_id, reservation_id=None)
+        await d10_usage_outbox.enqueue(build_model_usage_event(
+            feature="notes_transcription", context=context, model_call_index=1, attempt=1,
+            provider="openrouter", model=settings.audio_to_text_model, provider_request_id=None,
+            usage=None, raw_usage=None, latency_ms=0, status="error", cost_usd=None,
+            error_code="CALL_TRANSCRIPTION_UNAVAILABLE",
+        ))
+        raise HTTPException(status_code=502, detail="Call recording transcription unavailable") from None
+    await _record_d10_transcription(usage, result, include_summary=True)
+    return {"transcript": result.transcript, "summary": result.summary,
+            "summary_error": None if result.summary else "SUMMARY_UNAVAILABLE",
+            "summary_source": result.summary_source,
+            "summary_model_skipped": result.summary_model_skipped}
 
 
 @app.post("/internal/call-audio/analyze")
