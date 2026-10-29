@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased] - Bounded subscription voice dispatch (2026-10-29)
+
+- Allow trusted voice dispatch metadata to shorten the existing 300-second call cap with an integer `max_call_seconds` between 1 and 300. The worker uses that bounded value; metadata cannot extend the cap. Existing dispatches retain 300 seconds.
+- Schedule the bounded deadline before accounting/publication waits and send frozen `aiDurationSeconds` in the terminal lifecycle callback, excluding shutdown accounting time. Old Calling Service consumers ignore the additive field; D10's new consumer uses it for one final call settlement.
+- This supports D10 reserving its remaining included calling allowance and credit-funded overage before dispatch. AI remains stateless and does not decide paid entitlements or rewrite D10 prices. No migration or supplier configuration change. Full Python suite: 408 passed, including cap/callback validation; deployment pending the coordinated D10 release.
+
 ## [Unreleased] - Prospective voice supplier accounting (2026-10-25)
 
 - Preserve per-plugin generation/request IDs, tokens/cache/reasoning, speech units, model/voice/language and lifecycle evidence in the existing durable usage outbox. Add audit-only checkpoints and terminal completeness, without customer ratings or wallet charges for checkpoints; accounting storage failure never aborts a call.

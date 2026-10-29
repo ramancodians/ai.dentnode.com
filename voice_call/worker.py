@@ -33,7 +33,7 @@ from agent.calling_prompt import calling_system_prompt
 from agent.config import settings
 from agent.voice_agent import _REASONING_MANDATORY
 
-from .config import AGENT_NAME, ELEVENLABS_MODEL, ELEVENLABS_READY, MAX_CALL_SECONDS, CallConfig, opening_instructions, stt_language
+from .config import AGENT_NAME, ELEVENLABS_MODEL, ELEVENLABS_READY, CallConfig, opening_instructions, stt_language
 from .metering import book_call
 from .accounting import VoiceAccounting
 from .callbacks import notify
@@ -170,6 +170,7 @@ async def run_call(ctx: JobContext, cfg: CallConfig, accounting: VoiceAccounting
 
     # Phone-line time: how long each SIP (phone) participant was in the room.
     session_started = time.monotonic()
+    ai_finished_at: float | None = None
     sip_joined: dict = {}
     sip_seconds = 0.0
     sip_legs: dict = {}
@@ -195,15 +196,17 @@ async def run_call(ctx: JobContext, cfg: CallConfig, accounting: VoiceAccounting
 
     @ctx.room.on("participant_disconnected")
     def _on_left(p: rtc.RemoteParticipant) -> None:
-        nonlocal sip_seconds
+        nonlocal sip_seconds, ai_finished_at
         joined = sip_joined.pop(p.identity, None)
         if joined is not None:
             sip_seconds += time.monotonic() - joined
             if cfg.calling_service_callback and not sip_joined:
+                if accepted and ai_finished_at is None:
+                    ai_finished_at = time.monotonic()
                 ctx.shutdown(reason="caller_disconnected")
 
-    async def persist_final_usage() -> None:
-        now = time.monotonic()
+    async def persist_final_usage(ended_at: float) -> None:
+        now = ended_at
         try:
             # Flush the provider metrics before taking the immutable snapshot.
             try:
@@ -235,11 +238,16 @@ async def run_call(ctx: JobContext, cfg: CallConfig, accounting: VoiceAccounting
                 logger.error("Terminal voice accounting checkpoint failed")
 
     async def book() -> None:
+        nonlocal ai_finished_at
+        if ai_finished_at is None:
+            ai_finished_at = time.monotonic()
+        # Lifecycle timing excludes metrics/provider receipt teardown below.
+        final_ai_seconds = max(0, ai_finished_at - session_started) if accepted else 0.0
         # Pinned SDK shutdown/session-end budget is 30 seconds. Keep accounting
         # at 20s plus <=1s incomplete marker and <=7s lifecycle callback. Durable
         # outbox delivery continues in the independent API process after exit.
         try:
-            await asyncio.wait_for(persist_final_usage(), timeout=20)
+            await asyncio.wait_for(persist_final_usage(ai_finished_at), timeout=20)
         except asyncio.TimeoutError:
             logger.warning("Voice accounting shutdown budget reached; retained checkpoints remain incomplete")
             try:
@@ -249,7 +257,8 @@ async def run_call(ctx: JobContext, cfg: CallConfig, accounting: VoiceAccounting
                 pass
         finally:
             try:
-                await asyncio.wait_for(notify(cfg.calling_service_callback, "completed" if accepted else "failed", "\n".join(transcript)), timeout=7)
+                await asyncio.wait_for(notify(cfg.calling_service_callback, "completed" if accepted else "failed", "\n".join(transcript),
+                    ai_duration_seconds=final_ai_seconds), timeout=7)
             except asyncio.TimeoutError:
                 logger.warning("Voice lifecycle callback deadline reached; call owner reconciliation remains responsible")
 
@@ -268,14 +277,28 @@ async def run_call(ctx: JobContext, cfg: CallConfig, accounting: VoiceAccounting
         record=False,
     )
     logger.info("voice session started")
+    claim_started = time.monotonic()
     accepted = await notify(cfg.calling_service_callback, "started")
-    await accounting.checkpoint("owner_claim", accepted=accepted,
-        models={"llm": cfg.reply_model, "stt": cfg.stt_model, "tts": cfg.tts_model})
     if not accepted:
         ctx.shutdown(reason="call_claim_rejected")
         return
-    # Start billable AI time only once the owner acknowledges the active claim.
     session_started = time.monotonic()
+    # Include time awaiting the ownership acknowledgement and schedule the cap
+    # before any accounting or publication await can delay the greeting.
+    deadline = claim_started + cfg.max_call_seconds
+
+    async def hard_stop() -> None:
+        nonlocal ai_finished_at
+        await asyncio.sleep(max(0, deadline - time.monotonic()))
+        if ai_finished_at is None:
+            ai_finished_at = time.monotonic()
+        logger.info("call reached the %ss cap", cfg.max_call_seconds)
+        ctx.shutdown(reason="max_duration")
+
+    asyncio.ensure_future(hard_stop())
+    await accounting.checkpoint("owner_claim", accepted=accepted,
+        models={"llm": cfg.reply_model, "stt": cfg.stt_model, "tts": cfg.tts_model})
+    # Start billable AI time only once the owner acknowledges the active claim.
     if cfg.calling_service_callback:
         if not sip_joined:
             ctx.shutdown(reason="caller_disconnected")
@@ -302,10 +325,3 @@ async def run_call(ctx: JobContext, cfg: CallConfig, accounting: VoiceAccounting
         greeting.add_done_callback(_greeting_done)
     else:
         session.generate_reply(instructions=opening_instructions(cfg))
-
-    async def hard_stop() -> None:
-        await asyncio.sleep(MAX_CALL_SECONDS)
-        logger.info("call reached the %ss cap", MAX_CALL_SECONDS)
-        ctx.shutdown(reason="max_duration")
-
-    asyncio.ensure_future(hard_stop())

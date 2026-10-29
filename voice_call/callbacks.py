@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -37,13 +38,17 @@ class CallCallback:
         return cls(url, token)
 
 
-async def notify(callback, status: str, transcript: str = "") -> bool:
+async def notify(callback, status: str, transcript: str = "", *, ai_duration_seconds: float | None = None) -> bool:
     """False means the owner rejected/failed to acknowledge the claim; never speak then."""
     if callback is None:
         return True
     body = {"status": status}
     if transcript and status != "started":
         body["transcript"] = transcript[:100000]
+    if ai_duration_seconds is not None and status != "started":
+        if not math.isfinite(ai_duration_seconds) or not 0 <= ai_duration_seconds <= 3600:
+            raise ValueError("Invalid final AI duration")
+        body["aiDurationSeconds"] = ai_duration_seconds
     async with httpx.AsyncClient(timeout=5, follow_redirects=False, trust_env=False) as client:
         for attempt in range(3):
             try:

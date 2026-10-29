@@ -89,6 +89,7 @@ class CallConfig:
     tts_model: str = DEFAULT_TTS_MODEL
     tts_voice: str = os.environ.get("ELEVENLABS_HINDI_VOICE_ID", "") if ELEVENLABS_READY else ""
     source: str = "voice_lab"
+    max_call_seconds: int = MAX_CALL_SECONDS
     # Set by a dispatcher acting for a clinic (Calling Service): books the
     # call's spend to that clinic's D10 ledger. Absent = platform spend.
     usage_context: Optional[Dict[str, str]] = None
@@ -104,6 +105,12 @@ class CallConfig:
         if not isinstance(data, dict):
             data = {}
         cfg = cls()
+        # Only permit a dispatcher to shorten the hard cap, never extend it.
+        maximum = data.get("max_call_seconds")
+        if maximum is not None:
+            if isinstance(maximum, bool) or not isinstance(maximum, int) or not 1 <= maximum <= MAX_CALL_SECONDS:
+                raise ValueError("max_call_seconds must be an integer between 1 and 300")
+            cfg.max_call_seconds = maximum
         cfg.calling_service_callback = CallCallback.parse(data.get("calling_service_callback"))
         accounting = data.get("accounting_context")
         if isinstance(accounting, dict):
