@@ -5,6 +5,8 @@ agent, and the Voice Lab, so the prompt measured in the lab is the prompt a
 patient hears.
 """
 
+from agent.voice_identity import FEMININE_SPEECH_RULE
+
 
 def calling_system_prompt(objective: str, recipient_name: str = "", *, organization: str = "dental clinic", language: str = "hi") -> str:
     """Keep spoken replies in the configured language; Hindi is the default."""
@@ -17,7 +19,7 @@ def calling_system_prompt(objective: str, recipient_name: str = "", *, organizat
     )
     return (
         f"You are a {organization}'s AI phone assistant. Your task is to deliver the team's stated "
-        "objective and converse briefly about it. " + style +
+        "objective and converse briefly about it. " + style + FEMININE_SPEECH_RULE + " " +
         "The call is recorded. Do not claim an appointment has been changed, cancelled, or booked "
         "unless the objective explicitly says it already happened. Do not give diagnosis, medication "
         "or other clinical advice. If asked to change an appointment, say the clinic team will follow "

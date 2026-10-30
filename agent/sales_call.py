@@ -10,6 +10,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
+from agent.voice_identity import FEMININE_SPEECH_RULE
+
 FIELDS = ("name", "clinic_name", "city", "clinic_size", "current_software", "pain_point")
 INTENTS = ("continue", "book", "callback", "not_interested", "end")
 
@@ -47,6 +49,7 @@ def sales_call_system_prompt(language: str, slots: List[Dict[str, str]], fields:
         "questions, or as soon as they show interest, offer the demo times below.\n\n"
         f"Demo times you may offer (use only these, never invent a time):\n{slot_lines}\n\n"
         f"Already known: {known}. Still missing: {missing}. This is turn {turn} of at most {max_turns}.\n\n"
+        f"{FEMININE_SPEECH_RULE} "
         "Rules: Reply in one to three short spoken sentences, plain speech only, no lists, symbols or "
         "emojis; say times the way a person would. Speak "
         f"{spoken}. The caller's words reach you through English speech recognition, so Hindi may arrive "

@@ -1,16 +1,18 @@
 """ElevenLabs text-to-speech for phone calls: the one voice every DentNode call speaks with.
 
 Plivo plays the returned MP3 with <Play>, so its own <Speak>/Polly voice is not
-used. Same key and Hindi voice as the LiveKit worker (ELEVEN_API_KEY,
-ELEVENLABS_HINDI_VOICE_ID); Flash v2.5 reads Hinglish (Devanagari Hindi mixed
-with English words) naturally and is the low-latency model.
+used. Same key as the LiveKit worker (ELEVEN_API_KEY) and the one pinned female
+voice in agent/voice_identity.py; Flash v2.5 reads Hinglish (Devanagari Hindi
+mixed with English words) naturally and is the low-latency model.
 """
 
 import os
 import time
-from typing import Optional, Tuple
+from typing import Tuple
 
 import httpx
+
+from agent.voice_identity import VOICE_ID
 
 MODEL_ID = "eleven_flash_v2_5"
 # 22.05 kHz mono MP3 is well inside what Plivo <Play> accepts and keeps files small.
@@ -24,14 +26,14 @@ class TtsUnavailable(Exception):
 
 
 def tts_ready() -> bool:
-    return bool(os.environ.get("ELEVEN_API_KEY") and os.environ.get("ELEVENLABS_HINDI_VOICE_ID"))
+    return bool(os.environ.get("ELEVEN_API_KEY"))
 
 
-async def synthesize(text: str, voice_id: Optional[str] = None) -> Tuple[bytes, int]:
+async def synthesize(text: str) -> Tuple[bytes, int]:
     """Return (mp3 bytes, latency ms). Raises TtsUnavailable on any failure."""
     key = os.environ.get("ELEVEN_API_KEY")
-    voice = voice_id or os.environ.get("ELEVENLABS_HINDI_VOICE_ID")
-    if not key or not voice:
+    voice = VOICE_ID
+    if not key:
         raise TtsUnavailable("ElevenLabs is not configured")
     started = time.monotonic()
     try:
