@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - ElevenLabs speech for D10 phone calls + Hinglish demo call (2026-10-30)
+
+- Add `POST /d10/tts` (x-d10-internal-key): ElevenLabs Flash v2.5 MP3 (22.05 kHz) for Plivo `<Play>`, using the existing ELEVEN_API_KEY / ELEVENLABS_HINDI_VOICE_ID. 503 when unconfigured or the provider fails. Usage booked to `__platform__` at the list-price estimate. Rule from Raman: every spoken line on DentNode calls uses ElevenLabs, not Plivo/Polly `<Speak>`.
+- The d10.live demo-call sales turn now speaks Hinglish (Devanagari Hindi mixed with everyday English words) and is told the caller's speech arrives through English recognition. No migration.
+
 ## [Unreleased] - D10 demo-call sales receptionist (2026-10-30)
 
 - Add `POST /d10/sales-call/turn` (x-d10-internal-key): one stateless JSON turn for D10's own d10.live demo call. Returns the spoken reply, language (hi/en), extracted lead fields (name, clinic, city, size, current software, pain point), intent and an optional slot id chosen only from the slots D10 offered. The model never books; D10 does and speaks the confirmation.

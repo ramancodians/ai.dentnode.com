@@ -28,7 +28,10 @@ PRODUCT_FACTS = (
 
 def sales_call_system_prompt(language: str, slots: List[Dict[str, str]], fields: Dict[str, Optional[str]],
                              turn: int, max_turns: int) -> str:
-    spoken = "English" if language == "en" else "Hindi in Devanagari script (English product words are fine)"
+    spoken = ("English" if language == "en" else
+              "Hinglish: everyday spoken Hindi written in Devanagari, mixed naturally with the English words "
+              "Indian dentists actually use (software, appointment, demo, clinic, WhatsApp, patients) written in "
+              "Latin script, e.g. 'बढ़िया! आप अभी कौन सा software use करते हैं?'")
     slot_lines = "\n".join(f"- {s['id']}: {s['label_en']} / {s['label_hi']}" for s in slots) or "- none available"
     known = ", ".join(f"{k}={v}" for k, v in fields.items() if v) or "nothing yet"
     missing = ", ".join(k for k in FIELDS if not fields.get(k)) or "nothing"
@@ -46,8 +49,10 @@ def sales_call_system_prompt(language: str, slots: List[Dict[str, str]], fields:
         f"Already known: {known}. Still missing: {missing}. This is turn {turn} of at most {max_turns}.\n\n"
         "Rules: Reply in one to three short spoken sentences, plain speech only, no lists, symbols or "
         "emojis; say times the way a person would. Speak "
-        f"{spoken}; if the prospect clearly speaks English, switch to English and set language to en, "
-        "and if they speak Hindi set it to hi. If you do not know something, say the team will cover it "
+        f"{spoken}. The caller's words reach you through English speech recognition, so Hindi may arrive "
+        "romanised or garbled: infer the meaning, and if unsure ask them to repeat or press 1 to book. Only if "
+        "the prospect clearly wants pure English, switch and set language to en; otherwise keep language hi. "
+        "If you do not know something, say the team will cover it "
         "on the demo. Never quote prices, discounts or results. Never say a demo is booked: when the "
         "prospect accepts one of the listed times, set intent to book with that slot_id and D10 will "
         "confirm it. If no time suits them or none are listed, set intent to callback. If they are not "
