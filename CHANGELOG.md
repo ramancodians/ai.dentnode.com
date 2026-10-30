@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - One pinned female ElevenLabs voice for every call (2026-10-30)
+
+- Every ElevenLabs line (D10 `/d10/tts`, the LiveKit worker, Voice Lab) now uses Shivi V `BYoWSRudHCnfmjFrtcSW`. ElevenLabs labels it gender=female, language=hi. It is pinned in `agent/voice_identity.py` and no longer read from `ELEVENLABS_HINDI_VOICE_ID`; dispatch metadata cannot override it.
+- The phone prompts (`calling_prompt.py`, the d10.live sales call) now require feminine first-person Hindi forms (सकती/रही/दूँगी), so the words match the female voice. No migration.
+
 ## [Unreleased] - ElevenLabs speech for D10 phone calls + Hinglish demo call (2026-10-30)
 
 - Add `POST /d10/tts` (x-d10-internal-key): ElevenLabs Flash v2.5 MP3 (22.05 kHz) for Plivo `<Play>`, using the existing ELEVEN_API_KEY / ELEVENLABS_HINDI_VOICE_ID. 503 when unconfigured or the provider fails. Usage booked to `__platform__` at the list-price estimate. Rule from Raman: every spoken line on DentNode calls uses ElevenLabs, not Plivo/Polly `<Speak>`.

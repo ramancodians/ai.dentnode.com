@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from agent.voice_agent import REPLY_MODELS
+from agent.voice_identity import VOICE_ID as ELEVENLABS_VOICE_ID
 from .callbacks import CallCallback
 
 # LiveKit reads the worker's name from LIVEKIT_AGENT_NAME. Setting a name puts
@@ -39,7 +40,8 @@ TTS_MODELS = (
     "deepgram/aura-2",
 )
 ELEVENLABS_MODEL = "elevenlabs/eleven_flash_v2_5"
-ELEVENLABS_READY = bool(os.environ.get("ELEVEN_API_KEY") and os.environ.get("ELEVENLABS_HINDI_VOICE_ID"))
+# The voice is pinned in agent/voice_identity.py (female, Shivi V); only the key comes from env.
+ELEVENLABS_READY = bool(os.environ.get("ELEVEN_API_KEY"))
 DEFAULT_TTS_MODEL = ELEVENLABS_MODEL if ELEVENLABS_READY else TTS_MODELS[0]
 LANGUAGES = ("", "en", "hi", "mr")
 
@@ -87,7 +89,7 @@ class CallConfig:
     stt_model: str = STT_MODELS[0]
     reply_model: str = "anthropic/claude-haiku-4.5"
     tts_model: str = DEFAULT_TTS_MODEL
-    tts_voice: str = os.environ.get("ELEVENLABS_HINDI_VOICE_ID", "") if ELEVENLABS_READY else ""
+    tts_voice: str = ELEVENLABS_VOICE_ID if ELEVENLABS_READY else ""
     source: str = "voice_lab"
     max_call_seconds: int = MAX_CALL_SECONDS
     # Set by a dispatcher acting for a clinic (Calling Service): books the
@@ -133,8 +135,10 @@ class CallConfig:
             cfg.tts_model = data["tts_model"]
         if data.get("tts_model") == ELEVENLABS_MODEL and not ELEVENLABS_READY:
             cfg.tts_voice = ""
-        if cfg.tts_model == ELEVENLABS_MODEL and not cfg.tts_voice:
-            cfg.tts_voice = os.environ.get("ELEVENLABS_HINDI_VOICE_ID", "")
+        # ElevenLabs always speaks with the pinned female voice: a dispatch
+        # payload cannot pick another one and cause a gender mismatch.
+        if cfg.tts_model == ELEVENLABS_MODEL:
+            cfg.tts_voice = ELEVENLABS_VOICE_ID
         if cfg.tts_model != ELEVENLABS_MODEL and not data.get("tts_voice"):
             cfg.tts_voice = ""
         usage = data.get("usage_context")
