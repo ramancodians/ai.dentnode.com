@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - D10 demo-call sales receptionist (2026-10-30)
+
+- Add `POST /d10/sales-call/turn` (x-d10-internal-key): one stateless JSON turn for D10's own d10.live demo call. Returns the spoken reply, language (hi/en), extracted lead fields (name, clinic, city, size, current software, pain point), intent and an optional slot id chosen only from the slots D10 offered. The model never books; D10 does and speaks the confirmation.
+- Prompt in `agent/sales_call.py` limits claims to what d10.live already states: no prices, results or autonomous-booking promises. Usage is metered as `d10_demo_sales_call` to `__platform__`, never a clinic. No migration; deploy before the D10 release that calls it.
+
 ## [Unreleased] - Bounded subscription voice dispatch (2026-10-29)
 
 - Allow trusted voice dispatch metadata to shorten the existing 300-second call cap with an integer `max_call_seconds` between 1 and 300. The worker uses that bounded value; metadata cannot extend the cap. Existing dispatches retain 300 seconds.

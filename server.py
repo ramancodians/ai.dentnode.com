@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from agent.audio_fetch import AudioFetchError, fetch_audio, sniff_audio_format
 from agent.audio_to_text import AudioSummaryError, UnsupportedAudioFormat, transcribe_audio
 from agent.calling_prompt import calling_system_prompt
+from agent.sales_call import parse_sales_turn, sales_call_system_prompt
 from agent.case_from_image import CaseExtractionError, extract_case_from_image
 from agent.config import settings
 from agent.custom_report import (
@@ -801,6 +802,67 @@ async def calling_voice_reply(
     if not reply:
         raise HTTPException(status_code=502, detail="Voice agent returned no reply")
     return {"reply": reply[:900]}
+
+
+class SalesCallSlot(BaseModel):
+    id: str = Field(..., min_length=1, max_length=16)
+    label_hi: str = Field(..., max_length=80)
+    label_en: str = Field(..., max_length=80)
+
+
+class SalesCallTurnRequest(BaseModel):
+    lead_id: str = Field(..., min_length=1, max_length=64)
+    language: Literal["hi", "en"] = "hi"
+    speech: str = Field(..., min_length=1, max_length=1000)
+    history: List[CallingVoiceTurn] = Field(default_factory=list, max_length=20)
+    slots: List[SalesCallSlot] = Field(default_factory=list, max_length=5)
+    fields: Dict[str, Optional[str]] = Field(default_factory=dict)
+    turn: int = Field(..., ge=1, le=50)
+    max_turns: int = Field(default=10, ge=1, le=50)
+
+
+@app.post("/d10/sales-call/turn")
+async def d10_sales_call_turn(
+    body: SalesCallTurnRequest,
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Dict[str, Any]:
+    """One turn of D10's own d10.live demo call. D10 owns the call, lead and booking."""
+    _require_d10_internal_key(x_d10_internal_key)
+    slots = [slot.model_dump() for slot in body.slots]
+    messages: List[Dict[str, str]] = [{
+        "role": "system",
+        "content": sales_call_system_prompt(body.language, slots, body.fields, body.turn, body.max_turns),
+    }]
+    for turn in body.history:
+        messages.append({"role": "user", "content": turn.caller})
+        messages.append({"role": "assistant", "content": turn.agent})
+    messages.append({"role": "user", "content": body.speech})
+    started = time.monotonic()
+    try:
+        result = await chat_completion(
+            messages=messages, model=settings.d10_agent_model, temperature=0.3,
+            max_tokens=320, timeout_secs=10, extra_body={"response_format": {"type": "json_object"}},
+        )
+    except OpenRouterError as exc:
+        # Sales calls are DentNode's own cost, booked to the platform id, never a clinic.
+        await report_usage(feature="d10_demo_sales_call", lab_id=PLATFORM_LAB_ID,
+            model=settings.d10_agent_model, status="error",
+            latency_ms=int((time.monotonic() - started) * 1000),
+            request_id=f"demo-call:{body.lead_id}:turn:{body.turn}",
+            meta={"lead_id": body.lead_id, "error": type(exc).__name__})
+        logger.exception("Sales call turn failed")
+        raise HTTPException(status_code=502, detail="Sales agent unavailable")
+    await report_usage(feature="d10_demo_sales_call", lab_id=PLATFORM_LAB_ID,
+        model=result.model, usage=result.usage, cost=result.cost_usd,
+        cost_source="openrouter" if result.cost_usd is not None else "estimated",
+        status="ok", latency_ms=result.latency_ms,
+        request_id=f"demo-call:{body.lead_id}:turn:{body.turn}",
+        meta={"lead_id": body.lead_id, "pipeline": "plivo_ivr"})
+    try:
+        return parse_sales_turn(result.text, [slot.id for slot in body.slots], body.language)
+    except (ValueError, json.JSONDecodeError):
+        logger.warning("Sales call turn returned unusable JSON", extra={"lead_id": body.lead_id})
+        raise HTTPException(status_code=502, detail="Sales agent returned an unusable reply")
 
 
 @app.post("/audio-to-text")
