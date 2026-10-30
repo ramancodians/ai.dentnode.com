@@ -28,6 +28,7 @@ from agent.audio_fetch import AudioFetchError, fetch_audio, sniff_audio_format
 from agent.audio_to_text import AudioSummaryError, UnsupportedAudioFormat, transcribe_audio
 from agent.calling_prompt import calling_system_prompt
 from agent.sales_call import parse_sales_turn, sales_call_system_prompt
+from agent.elevenlabs_tts import MODEL_ID as ELEVENLABS_TTS_MODEL, USD_PER_1K_CHARS as ELEVENLABS_USD_PER_1K, TtsUnavailable, synthesize
 from agent.case_from_image import CaseExtractionError, extract_case_from_image
 from agent.config import settings
 from agent.custom_report import (
@@ -863,6 +864,33 @@ async def d10_sales_call_turn(
     except (ValueError, json.JSONDecodeError):
         logger.warning("Sales call turn returned unusable JSON", extra={"lead_id": body.lead_id})
         raise HTTPException(status_code=502, detail="Sales agent returned an unusable reply")
+
+
+class D10TtsRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=1200)
+    # What is speaking, for the usage ledger (e.g. "d10_demo_call").
+    feature: str = Field(default="d10_call_tts", pattern=r"^[a-z0-9_]{3,64}$")
+    request_id: str = Field(..., min_length=1, max_length=256)
+
+
+@app.post("/d10/tts")
+async def d10_tts(
+    body: D10TtsRequest,
+    x_d10_internal_key: Optional[str] = Header(default=None, alias="x-d10-internal-key"),
+) -> Response:
+    """ElevenLabs speech for a D10 phone call, as MP3 for Plivo <Play>."""
+    _require_d10_internal_key(x_d10_internal_key)
+    try:
+        audio, latency_ms = await synthesize(body.text)
+    except TtsUnavailable as exc:
+        logger.warning("D10 TTS unavailable", extra={"reason": str(exc)})
+        raise HTTPException(status_code=503, detail="Speech unavailable")
+    # D10's own sales calls have no clinic; booked to the platform id.
+    await report_usage(feature=body.feature, lab_id=PLATFORM_LAB_ID, model=f"elevenlabs/{ELEVENLABS_TTS_MODEL}",
+        usage={"characters": len(body.text)}, cost=len(body.text) / 1000 * ELEVENLABS_USD_PER_1K,
+        cost_source="estimated", status="ok", latency_ms=latency_ms, request_id=body.request_id,
+        meta={"component": "tts", "provider": "elevenlabs"})
+    return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.post("/audio-to-text")
